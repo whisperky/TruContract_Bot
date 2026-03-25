@@ -11,6 +11,14 @@ import { JsonStore } from "../storage/JsonStore.js";
 import { privateChannelOverwrites } from "../utils/discord.js";
 import { formatExternalId, nowIso } from "../utils/id.js";
 
+const TICKET_ID_PREFIXES: Record<TicketKind, string> = {
+  client_job: "JOB-TKT",
+  client_support: "SUP-TKT",
+  dev_profile: "PRO-TKT",
+  dev_application: "APP-TKT",
+  safety: "CASE-TKT"
+};
+
 export class TicketService {
   constructor(
     private readonly client: Client,
@@ -23,16 +31,19 @@ export class TicketService {
     ownerId: string,
     kind: TicketKind,
     parentCategoryId: string,
-    namePrefix: string,
     extra: {
       relatedJobId?: string;
       relatedApplicationId?: string;
+      participantIds?: string[];
     } = {}
   ): Promise<TicketRecord> {
+    const participantIds = extra.participantIds ?? [ownerId];
+
     const ticket = await this.store.mutate((draft) => {
       draft.counters.ticket += 1;
+      draft.counters.ticketByKind[kind] += 1;
       const created: TicketRecord = {
-        id: formatExternalId("TKT", draft.counters.ticket),
+        id: formatExternalId(TICKET_ID_PREFIXES[kind], draft.counters.ticketByKind[kind]),
         kind,
         ownerId,
         channelId: "",
@@ -57,10 +68,10 @@ export class TicketService {
     }
 
     const channel = await guild.channels.create({
-      name: `${namePrefix}-${ticket.id.toLowerCase()}`,
+      name: ticket.id.toLowerCase(),
       type: ChannelType.GuildText,
       parent: parent.id,
-      permissionOverwrites: privateChannelOverwrites(guild, ownerId, this.appConfig),
+      permissionOverwrites: privateChannelOverwrites(guild, participantIds, this.appConfig),
       topic: `Private ${kind} ticket ${ticket.id}`
     });
 
@@ -84,5 +95,27 @@ export class TicketService {
     }
 
     return channel;
+  }
+
+  async lockTextChannel(channelId: string, participantIds: string[]): Promise<void> {
+    const channel = await this.fetchTextChannel(channelId);
+    const uniqueParticipantIds = [...new Set(participantIds)];
+
+    await Promise.all(
+      uniqueParticipantIds.map((participantId) =>
+        channel.permissionOverwrites.edit(participantId, {
+          ViewChannel: true,
+          ReadMessageHistory: true,
+          SendMessages: false,
+          AttachFiles: false,
+          EmbedLinks: false,
+          AddReactions: false
+        })
+      )
+    );
+
+    await channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
+      ViewChannel: false
+    });
   }
 }

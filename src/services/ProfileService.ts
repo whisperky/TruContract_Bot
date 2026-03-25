@@ -101,6 +101,11 @@ export class ProfileService {
     return profile;
   }
 
+  async getProfileByUserId(userId: string): Promise<ProfileRecord | null> {
+    const snapshot = await this.store.get();
+    return snapshot.profiles.find((profile) => profile.userId === userId) ?? null;
+  }
+
   buildDeskEmbed(): EmbedBuilder {
     return new EmbedBuilder()
       .setTitle("Developer Desk")

@@ -7,12 +7,19 @@ export type TicketKind =
   | "dev_application"
   | "safety";
 
+export type TicketCounters = Record<TicketKind, number>;
+
 export type ProfileStatus = "pending" | "approved" | "rejected";
-export type JobStatus = "draft" | "published" | "paused" | "closed";
+export type JobStatus = "draft" | "published" | "paused" | "in_progress" | "closed";
 export type ApplicationStatus =
   | "submitted"
+  | "connected"
   | "shortlisted"
   | "rejected"
+  | "hired"
+  | "completed"
+  | "stopped"
+  | "closed"
   | "approved"
   | "withdrawn";
 
@@ -60,7 +67,9 @@ export interface ApplicationRecord {
   rate: string;
   availability: string;
   status: ApplicationStatus;
+  reviewMessageId?: string;
   privateChannelId?: string;
+  privateMessageId?: string;
   score?: number;
   createdAt: string;
   updatedAt: string;
@@ -88,5 +97,6 @@ export interface StoreSchema {
     application: number;
     ticket: number;
     deal: number;
+    ticketByKind: TicketCounters;
   };
 }

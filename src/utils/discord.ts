@@ -49,16 +49,18 @@ export function getDevTier(member: GuildMember, appConfig: AppConfig): Tier | nu
 
 export function privateChannelOverwrites(
   guild: Guild,
-  ownerId: string,
+  participantIds: string[],
   appConfig: AppConfig
 ): OverwriteResolvable[] {
+  const uniqueParticipantIds = [...new Set(participantIds)];
+
   return [
     {
       id: guild.roles.everyone.id,
       deny: [PermissionFlagsBits.ViewChannel]
     },
-    {
-      id: ownerId,
+    ...uniqueParticipantIds.map((participantId) => ({
+      id: participantId,
       allow: [
         PermissionFlagsBits.ViewChannel,
         PermissionFlagsBits.SendMessages,
@@ -66,7 +68,7 @@ export function privateChannelOverwrites(
         PermissionFlagsBits.AttachFiles,
         PermissionFlagsBits.EmbedLinks
       ]
-    },
+    })),
     ...appConfig.staffRoleIds.map((roleId) => ({
       id: roleId,
       allow: [
