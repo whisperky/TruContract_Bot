@@ -132,8 +132,9 @@ export class TrustContractBot {
         const tier = interaction.options.getString("tier", true) as Tier;
         const stars = interaction.options.getInteger("stars") ?? 2;
         const score = interaction.options.getInteger("score") ?? 70;
+        const disputes = interaction.options.getInteger("disputes") ?? undefined;
         const guildMember = await guild.members.fetch(user.id);
-        const profile = await this.profiles.approveProfile(guildMember, tier, stars, score);
+        const profile = await this.profiles.approveProfile(guildMember, tier, stars, score, disputes);
         await interaction.editReply(`Approved ${user} as ${tier}. Profile ${profile.id} published.`);
         return;
       }
@@ -265,6 +266,38 @@ export class TrustContractBot {
       return;
     }
 
+    if (scope === "job" && action === "suggest" && entityId) {
+      const job = await this.jobs.getJob(entityId);
+      if (!job) {
+        await interaction.reply({
+          content: `Job ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (!isStaff(member, this.appConfig) && interaction.user.id !== job.clientId) {
+        await interaction.reply({
+          content: "Only the client who owns the job or staff can request suggestions.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const allowedTiers = isStaff(member, this.appConfig)
+        ? (["gold", "silver", "copper"] as Tier[])
+        : getClientAllowedPublishTiers(member, this.appConfig);
+
+      await interaction.deferReply({ ephemeral: true });
+      const suggestions = await this.jobs.suggestProfiles(entityId, allowedTiers);
+      const room = await this.tickets.fetchTextChannel(job.privateChannelId);
+      for (const message of this.jobs.formatProfileSuggestionsMessages(job, suggestions)) {
+        await room.send(message);
+      }
+      await interaction.editReply(`Suggestions generated in ${room}.`);
+      return;
+    }
+
     if (scope === "job" && action === "close" && entityId) {
       const job = await this.jobs.getJob(entityId);
       if (!job) {
@@ -305,6 +338,16 @@ export class TrustContractBot {
       if (!job || job.status !== "published") {
         await interaction.reply({
           content: "This job is not currently accepting applications.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const profile = await this.profiles.getProfileByUserId(interaction.user.id);
+      const profileThreadId = this.getPublishedProfileThreadId(profile);
+      if (!profileThreadId) {
+        await interaction.reply({
+          content: "Create and publish your developer profile first before applying.",
           ephemeral: true
         });
         return;
@@ -375,22 +418,17 @@ export class TrustContractBot {
 
     if (scope === "modal" && action === "dev_profile") {
       await interaction.deferReply({ ephemeral: true });
-      const headline = interaction.fields.getTextInputValue("profile_headline").trim();
-      const bio = interaction.fields.getTextInputValue("profile_bio").trim();
+      const headline = interaction.fields.getTextInputValue("profile_title").trim();
+      const bio = interaction.fields.getTextInputValue("profile_summary").trim();
+      const previousProjects = interaction.fields.getTextInputValue("profile_projects").trim();
       const skills = interaction.fields.getTextInputValue("profile_skills").trim();
       const portfolios = interaction.fields.getTextInputValue("profile_links").trim();
-      const availability = interaction.fields.getTextInputValue("profile_availability").trim();
+      const member = await guild.members.fetch(interaction.user.id);
 
-      const ticket = await this.tickets.createPrivateTicket(
-        guild,
-        interaction.user.id,
-        "dev_profile",
-        this.appConfig.categoryIds.devPrivate
-      );
-
-      const profile = await this.profiles.upsertProfile(interaction.user.id, {
+      const profile = await this.profiles.submitProfile(member, {
         headline,
         bio,
+        previousProjects,
         skills: skills
           .split(",")
           .map((value) => value.trim())
@@ -398,25 +436,15 @@ export class TrustContractBot {
         portfolioLinks: portfolios
           .split(",")
           .map((value) => value.trim())
-          .filter(Boolean),
-        availability,
-        privateChannelId: ticket.channelId
+          .filter(Boolean)
       });
 
-      const room = await this.tickets.fetchTextChannel(ticket.channelId);
-      await room.send(
-        [
-          `# ${profile.id} profile received`,
-          "",
-          "Staff will review this private profile submission before anything is published.",
-          "",
-          `**Headline:** ${profile.headline}`,
-          `**Skills:** ${profile.skills.join(", ") || "none"}`,
-          `**Availability:** ${profile.availability}`
-        ].join("\n")
+      const threadId = this.getPublishedProfileThreadId(profile);
+      await interaction.editReply(
+        threadId
+          ? `Profile synced to your network forum: <#${threadId}>`
+          : `Profile ${profile.id} was saved, but no public profile thread was found.`
       );
-
-      await interaction.editReply(`Private profile room created: ${room}`);
       return;
     }
 
@@ -670,6 +698,10 @@ export class TrustContractBot {
         await interaction.deferReply({ ephemeral: true });
         await this.jobs.completeApplication(application.id);
         await this.jobs.closeJob(job.id);
+        const completedMember = await member.guild.members.fetch(application.devUserId).catch(() => null);
+        if (completedMember) {
+          await this.profiles.recordContractOutcome(completedMember, "completed");
+        }
         if (application.privateChannelId) {
           await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
         }
@@ -697,6 +729,10 @@ export class TrustContractBot {
 
         await interaction.deferReply({ ephemeral: true });
         const result = await this.jobs.stopApplication(application.id);
+        const stoppedMember = await member.guild.members.fetch(application.devUserId).catch(() => null);
+        if (stoppedMember) {
+          await this.profiles.recordContractOutcome(stoppedMember, "stopped");
+        }
         await this.jobs.refreshPublishedJobPosts(result.job.id);
         if (application.privateChannelId) {
           await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
@@ -876,19 +912,30 @@ function buildDeveloperProfileModal(): ModalBuilder {
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
-          .setCustomId("profile_headline")
-          .setLabel("Headline")
+          .setCustomId("profile_title")
+          .setLabel("Title")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
+          .setPlaceholder("Senior React Engineer")
           .setMaxLength(100)
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
-          .setCustomId("profile_bio")
-          .setLabel("Short Bio")
+          .setCustomId("profile_summary")
+          .setLabel("Summary")
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
-          .setMaxLength(1000)
+          .setPlaceholder("What you do well, what you focus on, and the type of work you are best suited for.")
+          .setMaxLength(1500)
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("profile_projects")
+          .setLabel("Previous Projects")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setPlaceholder("Important products, clients, repos, or outcomes you have delivered.")
+          .setMaxLength(1500)
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
@@ -901,18 +948,11 @@ function buildDeveloperProfileModal(): ModalBuilder {
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("profile_links")
-          .setLabel("Portfolio Links (comma separated)")
+          .setLabel("Links (GitHub, LinkedIn, Portfolio)")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setMaxLength(400)
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("profile_availability")
-          .setLabel("Availability")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(100)
+          .setPlaceholder("https://github.com/..., https://linkedin.com/..., https://portfolio.com")
+          .setMaxLength(500)
       )
     );
 }

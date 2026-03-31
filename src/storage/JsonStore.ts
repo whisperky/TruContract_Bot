@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { StoreSchema, TicketCounters, TicketRecord } from "../domain/models.js";
+import type { ProfileRecord, StoreSchema, TicketCounters, TicketRecord } from "../domain/models.js";
 
 const DEFAULT_TICKET_COUNTERS: TicketCounters = {
   client_job: 0,
@@ -54,8 +54,52 @@ function deriveTicketCounters(
   return counters;
 }
 
+function normalizeProfiles(data: Partial<StoreSchema>["profiles"]): ProfileRecord[] {
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  return data.map((profile) => {
+    const normalized: ProfileRecord = {
+      id: profile?.id ?? "",
+      userId: profile?.userId ?? "",
+      headline: profile?.headline ?? "",
+      bio: profile?.bio ?? "",
+      previousProjects: profile?.previousProjects ?? "",
+      skills: Array.isArray(profile?.skills) ? profile.skills : [],
+      portfolioLinks: Array.isArray(profile?.portfolioLinks) ? profile.portfolioLinks : [],
+      availability: profile?.availability ?? "",
+      trustScore: profile?.trustScore ?? 50,
+      moderatorStars: profile?.moderatorStars ?? 0,
+      completedContracts: profile?.completedContracts ?? 0,
+      stoppedContracts: profile?.stoppedContracts ?? 0,
+      disputeCount: profile?.disputeCount ?? 0,
+      status: profile?.status ?? "pending",
+      visibilityTiers: Array.isArray(profile?.visibilityTiers)
+        ? profile.visibilityTiers.filter(Boolean)
+        : profile?.approvedTier
+          ? [profile.approvedTier]
+          : [],
+      networkRegisteredAt: profile?.networkRegisteredAt ?? profile?.createdAt ?? "",
+      publishedPostIds: profile?.publishedPostIds ?? {},
+      createdAt: profile?.createdAt ?? "",
+      updatedAt: profile?.updatedAt ?? profile?.createdAt ?? ""
+    };
+
+    if (profile?.approvedTier) {
+      normalized.approvedTier = profile.approvedTier;
+    }
+
+    if (profile?.privateChannelId) {
+      normalized.privateChannelId = profile.privateChannelId;
+    }
+
+    return normalized;
+  });
+}
+
 function normalizeStore(data: Partial<StoreSchema>): StoreSchema {
-  const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+  const profiles = normalizeProfiles(data.profiles);
   const jobs = Array.isArray(data.jobs) ? data.jobs : [];
   const applications = Array.isArray(data.applications) ? data.applications : [];
   const tickets = Array.isArray(data.tickets) ? data.tickets : [];

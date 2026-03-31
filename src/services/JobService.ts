@@ -371,6 +371,48 @@ export class JobService {
     return ranked;
   }
 
+  async suggestProfiles(
+    jobId: string,
+    allowedTiers: Tier[]
+  ): Promise<
+    Array<{
+      profile: ProfileRecord;
+      threadId: string;
+      score: number;
+      fitScore: number;
+      trustScore: number;
+      tenureScore: number;
+      linkScore: number;
+    }>
+  > {
+    const snapshot = await this.store.get();
+    const job = snapshot.jobs.find((item) => item.id === jobId);
+    if (!job) {
+      throw new Error(`Job ${jobId} was not found.`);
+    }
+
+    const jobTokens = tokenize([job.title, job.summary, job.skills.join(" ")].join(" "));
+    const ranked = snapshot.profiles
+      .map((profile) => {
+        const threadId = this.getVisibleProfileThreadId(profile, allowedTiers);
+        if (!threadId || profile.status !== "approved") {
+          return null;
+        }
+
+        const scored = this.scoreProfileSuggestion(jobTokens, profile);
+        return {
+          profile,
+          threadId,
+          ...scored
+        };
+      })
+      .filter((item) => item !== null)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 50);
+
+    return ranked;
+  }
+
   buildClientDeskEmbed(): EmbedBuilder {
     return new EmbedBuilder()
       .setTitle("Client Desk")
@@ -416,6 +458,10 @@ export class JobService {
           .setStyle(ButtonStyle.Primary)
       ),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`job|suggest|${jobId}`)
+          .setLabel("Suggest Developers")
+          .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
           .setCustomId(`job|shortlist|${jobId}`)
           .setLabel("Request Shortlist")
@@ -587,6 +633,47 @@ export class JobService {
     });
 
     return [`# ${job.id} shortlist`, "", ...lines].join("\n");
+  }
+
+  formatProfileSuggestionsMessages(
+    job: JobRecord,
+    suggestions: Array<{
+      profile: ProfileRecord;
+      threadId: string;
+      score: number;
+      fitScore: number;
+      trustScore: number;
+      tenureScore: number;
+      linkScore: number;
+    }>
+  ): string[] {
+    if (suggestions.length === 0) {
+      return [`# ${job.id} suggestions\n\nNo published developer profiles matched this job yet.`];
+    }
+
+    const lines = suggestions.map((suggestion, index) => {
+      const skills = suggestion.profile.skills.join(", ") || "none";
+      const tier = suggestion.profile.approvedTier ?? "unassigned";
+
+      return [
+        `${index + 1}. <@${suggestion.profile.userId}>`,
+        `   - profile: <#${suggestion.threadId}>`,
+        `   - title: ${suggestion.profile.headline}`,
+        `   - network: ${tier}`,
+        `   - total: ${suggestion.score}`,
+        `   - fit/trust/tenure/links: ${suggestion.fitScore}/${suggestion.trustScore}/${suggestion.tenureScore}/${suggestion.linkScore}`,
+        `   - skills: ${skills}`
+      ].join("\n");
+    });
+
+    const chunks: string[] = [];
+    for (let index = 0; index < lines.length; index += 10) {
+      const chunkLines = lines.slice(index, index + 10);
+      const title = index === 0 ? `# ${job.id} suggestions` : `# ${job.id} suggestions (cont.)`;
+      chunks.push([title, "", ...chunkLines].join("\n"));
+    }
+
+    return chunks;
   }
 
   private renderPublicJobPost(job: JobRecord, tier: Tier): string {
@@ -770,5 +857,79 @@ export class JobService {
     const trustScore = profile?.trustScore ?? 40;
     const starScore = (profile?.moderatorStars ?? 0) * 15;
     return tokenScore + trustScore + starScore;
+  }
+
+  private scoreProfileSuggestion(jobTokens: string[], profile: ProfileRecord): {
+    score: number;
+    fitScore: number;
+    trustScore: number;
+    tenureScore: number;
+    linkScore: number;
+  } {
+    const profileTokens = tokenize(
+      [profile.headline, profile.bio, profile.previousProjects, profile.skills.join(" "), profile.portfolioLinks.join(" ")]
+        .join(" ")
+    );
+    const fitScore = overlapScore(jobTokens, profileTokens) * 8;
+    const trustScore = Math.max(
+      0,
+      Math.round(profile.trustScore * 0.4) +
+        profile.moderatorStars * 6 +
+        profile.completedContracts * 4 -
+        profile.stoppedContracts * 3 -
+        profile.disputeCount * 8
+    );
+    const tenureScore = this.getTenureScore(profile.networkRegisteredAt || profile.createdAt);
+    const linkScore = this.getProfileLinkScore(profile.portfolioLinks);
+
+    return {
+      score: fitScore + trustScore + tenureScore + linkScore,
+      fitScore,
+      trustScore,
+      tenureScore,
+      linkScore
+    };
+  }
+
+  private getVisibleProfileThreadId(profile: ProfileRecord, allowedTiers: Tier[]): string | null {
+    for (const tier of allowedTiers) {
+      const threadId = profile.publishedPostIds[tier];
+      if (threadId) {
+        return threadId;
+      }
+    }
+
+    return null;
+  }
+
+  private getTenureScore(networkRegisteredAt: string): number {
+    const createdAt = new Date(networkRegisteredAt);
+    if (Number.isNaN(createdAt.getTime())) {
+      return 0;
+    }
+
+    const ageInDays = Math.max(0, (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+    return Math.min(12, Math.round(ageInDays / 30));
+  }
+
+  private getProfileLinkScore(links: string[]): number {
+    let score = 0;
+
+    for (const link of links) {
+      const value = link.toLowerCase();
+      if (value.includes("github.com")) {
+        score += 4;
+        continue;
+      }
+
+      if (value.includes("linkedin.com")) {
+        score += 1;
+        continue;
+      }
+
+      score += 2;
+    }
+
+    return Math.min(score, 10);
   }
 }

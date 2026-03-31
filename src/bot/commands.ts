@@ -16,7 +16,7 @@ export const slashCommands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
     .setName("profile-approve")
-    .setDescription("Approve a developer profile and publish it to a talent forum.")
+    .setDescription("Review a developer profile, update trust, and sync it to the right talent forum.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addUserOption((option) =>
       option.setName("user").setDescription("Developer user").setRequired(true)
@@ -44,6 +44,14 @@ export const slashCommands = [
       option
         .setName("score")
         .setDescription("Trust score from 0 to 100")
+        .setMinValue(0)
+        .setMaxValue(100)
+        .setRequired(false)
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName("disputes")
+        .setDescription("Total disputes or safety issues for this profile")
         .setMinValue(0)
         .setMaxValue(100)
         .setRequired(false)
