@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   Client,
   Events,
+  type Guild,
   ModalBuilder,
   PermissionFlagsBits,
   TextInputBuilder,
@@ -88,6 +89,12 @@ export class TrustContractBot {
       }
     });
   }
+
+  private EMOJIS = {
+    full: "<:star_full:1488689485720981534>",
+    half: "<:star_half:1488689511104905216>",
+    empty: "<:star_empty:1488689461893140480>",
+  };
 
   async login(): Promise<void> {
     await this.client.login(this.appConfig.token);
@@ -499,6 +506,67 @@ export class TrustContractBot {
       return;
     }
 
+    console.log("scope", scope, action, entityId);
+
+    if (scope === "modal" && (action === "feedback_completed" || action === "feedback_stopped") && entityId) {
+      const application = await this.jobs.getApplication(entityId);
+      if (!application) {
+        await interaction.reply({
+          content: `Application ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const job = await this.jobs.getJob(application.jobId);
+      if (!job) {
+        await interaction.reply({
+          content: `Job ${application.jobId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (interaction.user.id !== job.clientId) {
+        await interaction.reply({
+          content: "Only the client who owns the job can finish this contract and leave feedback.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (application.status !== "hired") {
+        await interaction.reply({
+          content: "This contract is no longer awaiting final feedback.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const scoreRaw = interaction.fields.getTextInputValue("feedback_score").trim();
+      const score = Number(scoreRaw);
+      console.log("score", score);
+      if (!Number.isInteger(score) || score < 1 || score > 5) {
+        await interaction.reply({
+          content: "Feedback score must be a whole number from 1 to 5.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const feedbackMessage = interaction.fields.getTextInputValue("feedback_message").trim();
+      console.log("feedbackMessage", feedbackMessage);
+
+      const outcome = action === "feedback_completed" ? "completed" : "stopped";
+
+      await interaction.deferReply({ ephemeral: true });
+      await this.finalizeApplicationWithFeedback(guild, application, job, outcome, score, feedbackMessage);
+      await interaction.editReply(
+        `${outcome === "completed" ? "Completed" : "Stopped"} ${application.id} and saved feedback ${this.formatScoreStars(score)}.`
+      );
+      return;
+    }
+
     await interaction.reply({
       content: "Unknown modal action.",
       ephemeral: true
@@ -531,6 +599,7 @@ export class TrustContractBot {
 
     const canManageJob = isStaff(member, this.appConfig) || interaction.user.id === job.clientId;
     const canAccessConversation = canManageJob || interaction.user.id === application.devUserId;
+    const canFinalizeHire = interaction.user.id === job.clientId;
 
     switch (action) {
       case "connect": {
@@ -679,9 +748,9 @@ export class TrustContractBot {
       }
 
       case "complete": {
-        if (!canManageJob) {
+        if (!canFinalizeHire) {
           await interaction.reply({
-            content: "Only the client who owns the job or staff can complete this hire.",
+            content: "Only the client who owns the job can complete this hire and leave feedback.",
             ephemeral: true
           });
           return;
@@ -695,25 +764,14 @@ export class TrustContractBot {
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
-        await this.jobs.completeApplication(application.id);
-        await this.jobs.closeJob(job.id);
-        const completedMember = await member.guild.members.fetch(application.devUserId).catch(() => null);
-        if (completedMember) {
-          await this.profiles.recordContractOutcome(completedMember, "completed");
-        }
-        if (application.privateChannelId) {
-          await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
-        }
-        await this.syncApplicationMessages(application.id);
-        await interaction.editReply(`Completed ${application.id} and closed ${job.id}.`);
+        await interaction.showModal(buildApplicationFeedbackModal(application.id, "completed"));
         return;
       }
 
       case "stop": {
-        if (!canAccessConversation) {
+        if (!canFinalizeHire) {
           await interaction.reply({
-            content: "Only the client, the selected developer, or staff can stop this hire.",
+            content: "Only the client who owns the job can stop this hire and leave feedback.",
             ephemeral: true
           });
           return;
@@ -727,18 +785,7 @@ export class TrustContractBot {
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
-        const result = await this.jobs.stopApplication(application.id);
-        const stoppedMember = await member.guild.members.fetch(application.devUserId).catch(() => null);
-        if (stoppedMember) {
-          await this.profiles.recordContractOutcome(stoppedMember, "stopped");
-        }
-        await this.jobs.refreshPublishedJobPosts(result.job.id);
-        if (application.privateChannelId) {
-          await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
-        }
-        await this.syncApplicationMessages(application.id);
-        await interaction.editReply(`Stopped ${application.id}.`);
+        await interaction.showModal(buildApplicationFeedbackModal(application.id, "stopped"));
         return;
       }
 
@@ -817,6 +864,50 @@ export class TrustContractBot {
 
     const created = await channel.send(payload);
     return created.id;
+  }
+
+  private async finalizeApplicationWithFeedback(
+    guild: Guild,
+    application: ApplicationRecord,
+    job: JobRecord,
+    outcome: "completed" | "stopped",
+    score: number,
+    feedbackMessage: string
+  ): Promise<void> {
+    const devMember = await guild.members.fetch(application.devUserId).catch(() => null);
+    if (!devMember) {
+      throw new Error(`Developer ${application.devUserId} could not be found for feedback.`);
+    }
+
+    if (outcome === "completed") {
+      await this.jobs.completeApplication(application.id);
+      await this.jobs.closeJob(job.id);
+    } else {
+      const result = await this.jobs.stopApplication(application.id);
+      await this.jobs.refreshPublishedJobPosts(result.job.id);
+    }
+
+    await this.profiles.addFeedback(devMember, {
+      jobId: job.id,
+      applicationId: application.id,
+      clientUserId: job.clientId,
+      jobTitle: job.title,
+      outcome,
+      score,
+      message: feedbackMessage
+    });
+
+    if (application.privateChannelId) {
+      await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
+    }
+
+    await this.syncApplicationMessages(application.id);
+  }
+
+  private formatScoreStars(score: number): string {
+    const safeScore = Math.max(1, Math.min(5, Math.round(score)));
+  
+    return `${this.EMOJIS.full.repeat(safeScore)}${this.EMOJIS.empty.repeat(5 - safeScore)} ${safeScore}/5`;
   }
 
   private async deployPanels(): Promise<void> {
@@ -1017,6 +1108,38 @@ function buildApplicationModal(jobId: string): ModalBuilder {
           .setStyle(TextInputStyle.Short)
           .setRequired(false)
           .setMaxLength(100)
+      )
+    );
+}
+
+function buildApplicationFeedbackModal(
+  applicationId: string,
+  outcome: "completed" | "stopped"
+): ModalBuilder {
+  const title = outcome === "completed" ? "Complete Contract" : "Stop Contract";
+  const messageLabel = outcome === "completed" ? "Feedback (optional)" : "Why it stopped? (optional)";
+
+  return new ModalBuilder()
+    .setCustomId(`modal|feedback_${outcome}|${applicationId}`)
+    .setTitle(title)
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("feedback_score")
+          .setLabel("Score (1 to 5)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder("5")
+          .setMinLength(1)
+          .setMaxLength(1)
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("feedback_message")
+          .setLabel(messageLabel)
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(1000)
       )
     );
 }

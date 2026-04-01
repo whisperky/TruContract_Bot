@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { ProfileRecord, StoreSchema, TicketCounters, TicketRecord } from "../domain/models.js";
+import type { FeedbackRecord, ProfileRecord, StoreSchema, TicketCounters, TicketRecord } from "../domain/models.js";
 
 const DEFAULT_TICKET_COUNTERS: TicketCounters = {
   client_job: 0,
@@ -15,11 +15,13 @@ const DEFAULT_STORE: StoreSchema = {
   profiles: [],
   jobs: [],
   applications: [],
+  feedbacks: [],
   tickets: [],
   counters: {
     profile: 0,
     job: 0,
     application: 0,
+    feedback: 0,
     ticket: 0,
     deal: 0,
     ticketByKind: { ...DEFAULT_TICKET_COUNTERS }
@@ -74,6 +76,8 @@ function normalizeProfiles(data: Partial<StoreSchema>["profiles"]): ProfileRecor
       completedContracts: profile?.completedContracts ?? 0,
       stoppedContracts: profile?.stoppedContracts ?? 0,
       disputeCount: profile?.disputeCount ?? 0,
+      feedbackCount: profile?.feedbackCount ?? 0,
+      feedbackAverage: profile?.feedbackAverage ?? 0,
       status: profile?.status ?? "pending",
       visibilityTiers: Array.isArray(profile?.visibilityTiers)
         ? profile.visibilityTiers.filter(Boolean)
@@ -98,21 +102,43 @@ function normalizeProfiles(data: Partial<StoreSchema>["profiles"]): ProfileRecor
   });
 }
 
+function normalizeFeedbacks(data: Partial<StoreSchema>["feedbacks"]): FeedbackRecord[] {
+  if (!Array.isArray(data)) {
+    return [];
+  }
+
+  return data.map((feedback) => ({
+    id: feedback?.id ?? "",
+    jobId: feedback?.jobId ?? "",
+    applicationId: feedback?.applicationId ?? "",
+    clientUserId: feedback?.clientUserId ?? "",
+    devUserId: feedback?.devUserId ?? "",
+    jobTitle: feedback?.jobTitle ?? "",
+    outcome: feedback?.outcome === "stopped" ? "stopped" : "completed",
+    score: typeof feedback?.score === "number" ? feedback.score : 0,
+    message: feedback?.message ?? "",
+    createdAt: feedback?.createdAt ?? ""
+  }));
+}
+
 function normalizeStore(data: Partial<StoreSchema>): StoreSchema {
   const profiles = normalizeProfiles(data.profiles);
   const jobs = Array.isArray(data.jobs) ? data.jobs : [];
   const applications = Array.isArray(data.applications) ? data.applications : [];
+  const feedbacks = normalizeFeedbacks(data.feedbacks);
   const tickets = Array.isArray(data.tickets) ? data.tickets : [];
 
   return {
     profiles,
     jobs,
     applications,
+    feedbacks,
     tickets,
     counters: {
       profile: data.counters?.profile ?? 0,
       job: data.counters?.job ?? 0,
       application: data.counters?.application ?? 0,
+      feedback: data.counters?.feedback ?? 0,
       ticket: data.counters?.ticket ?? 0,
       deal: data.counters?.deal ?? 0,
       ticketByKind: deriveTicketCounters(tickets, data.counters?.ticketByKind)

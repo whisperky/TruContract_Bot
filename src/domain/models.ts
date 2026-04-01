@@ -37,6 +37,8 @@ export interface ProfileRecord {
   completedContracts: number;
   stoppedContracts: number;
   disputeCount: number;
+  feedbackCount: number;
+  feedbackAverage: number;
   status: ProfileStatus;
   approvedTier?: Tier;
   visibilityTiers: Tier[];
@@ -76,9 +78,23 @@ export interface ApplicationRecord {
   reviewMessageId?: string;
   privateChannelId?: string;
   privateMessageId?: string;
+  feedbackId?: string;
   score?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface FeedbackRecord {
+  id: string;
+  jobId: string;
+  applicationId: string;
+  clientUserId: string;
+  devUserId: string;
+  jobTitle: string;
+  outcome: "completed" | "stopped";
+  score: number;
+  message: string;
+  createdAt: string;
 }
 
 export interface TicketRecord {
@@ -96,11 +112,13 @@ export interface StoreSchema {
   profiles: ProfileRecord[];
   jobs: JobRecord[];
   applications: ApplicationRecord[];
+  feedbacks: FeedbackRecord[];
   tickets: TicketRecord[];
   counters: {
     profile: number;
     job: number;
     application: number;
+    feedback: number;
     ticket: number;
     deal: number;
     ticketByKind: TicketCounters;

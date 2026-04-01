@@ -10,7 +10,7 @@ import {
 } from "discord.js";
 
 import type { AppConfig } from "../config.js";
-import type { ApplicationRecord, JobRecord, ProfileRecord, Tier } from "../domain/models.js";
+import type { ApplicationRecord, FeedbackRecord, JobRecord, ProfileRecord, Tier } from "../domain/models.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { formatExternalId, nowIso } from "../utils/id.js";
 import { overlapScore, tokenize } from "../utils/text.js";
@@ -21,6 +21,12 @@ export class JobService {
     private readonly store: JsonStore,
     private readonly appConfig: AppConfig
   ) {}
+
+  private EMOJIS = {
+    full: "<:star_full:1488689485720981534>",
+    half: "<:star_half:1488689511104905216>",
+    empty: "<:star_empty:1488689461893140480>",
+  };
 
   async createJob(
     clientUserId: string,
@@ -383,6 +389,7 @@ export class JobService {
       trustScore: number;
       tenureScore: number;
       linkScore: number;
+      recentFeedbacks: FeedbackRecord[];
     }>
   > {
     const snapshot = await this.store.get();
@@ -400,9 +407,14 @@ export class JobService {
         }
 
         const scored = this.scoreProfileSuggestion(jobTokens, profile);
+        const recentFeedbacks = snapshot.feedbacks
+          .filter((feedback) => feedback.devUserId === profile.userId)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+          .slice(0, 2);
         return {
           profile,
           threadId,
+          recentFeedbacks,
           ...scored
         };
       })
@@ -645,6 +657,7 @@ export class JobService {
       trustScore: number;
       tenureScore: number;
       linkScore: number;
+      recentFeedbacks: FeedbackRecord[];
     }>
   ): string[] {
     if (suggestions.length === 0) {
@@ -654,6 +667,12 @@ export class JobService {
     const lines = suggestions.map((suggestion, index) => {
       const skills = suggestion.profile.skills.join(", ") || "none";
       const tier = suggestion.profile.approvedTier ?? "unassigned";
+      const rating = this.formatAverageStars(suggestion.profile.feedbackAverage, suggestion.profile.feedbackCount);
+      const recentFeedbackLines = suggestion.recentFeedbacks.map((feedback) => {
+        const status = feedback.outcome === "completed" ? "success" : "fail";
+        const snippet = feedback.message ? ` - ${this.truncate(feedback.message, 80)}` : "";
+        return `   - feedback: ${this.formatScoreStars(feedback.score)} | ${status}${snippet}`;
+      });
 
       return [
         `${index + 1}. <@${suggestion.profile.userId}>`,
@@ -662,7 +681,9 @@ export class JobService {
         `   - network: ${tier}`,
         `   - total: ${suggestion.score}`,
         `   - fit/trust/tenure/links: ${suggestion.fitScore}/${suggestion.trustScore}/${suggestion.tenureScore}/${suggestion.linkScore}`,
-        `   - skills: ${skills}`
+        `   - rating: ${rating}`,
+        `   - skills: ${skills}`,
+        ...recentFeedbackLines
       ].join("\n");
     });
 
@@ -877,7 +898,8 @@ export class JobService {
         profile.moderatorStars * 6 +
         profile.completedContracts * 4 -
         profile.stoppedContracts * 3 -
-        profile.disputeCount * 8
+        profile.disputeCount * 8 +
+        Math.round(profile.feedbackAverage * 4)
     );
     const tenureScore = this.getTenureScore(profile.networkRegisteredAt || profile.createdAt);
     const linkScore = this.getProfileLinkScore(profile.portfolioLinks);
@@ -931,5 +953,44 @@ export class JobService {
     }
 
     return Math.min(score, 10);
+  }
+
+  private formatScoreStars(score: number): string {
+    const safeScore = Math.max(1, Math.min(5, Math.round(score)));
+  
+    return `${this.EMOJIS.full.repeat(safeScore)}${this.EMOJIS.empty.repeat(5 - safeScore)} ${safeScore}/5`;
+  }
+  
+  private formatAverageStars(average: number, count: number): string {
+    if (count === 0) {
+      return "N/A";
+    }
+  
+    // round to nearest 0.5
+    const rounded = Math.round(average * 2) / 2;
+  
+    const full = Math.floor(rounded);
+    const hasHalf = rounded % 1 !== 0;
+  
+    let stars = "";
+  
+    stars += this.EMOJIS.full.repeat(full);
+  
+    if (hasHalf) {
+      stars += this.EMOJIS.half;
+    }
+  
+    const totalStars = full + (hasHalf ? 1 : 0);
+    stars += this.EMOJIS.empty.repeat(5 - totalStars);
+  
+    return `${stars} ${average.toFixed(1)}/5 from ${count}`;
+  }
+  
+  private truncate(value: string, maxLength: number): string {
+    if (value.length <= maxLength) {
+      return value;
+    }
+  
+    return `${value.slice(0, maxLength - 3)}...`;
   }
 }

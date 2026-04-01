@@ -11,7 +11,7 @@ import {
 } from "discord.js";
 
 import type { AppConfig } from "../config.js";
-import type { ProfileRecord, Tier } from "../domain/models.js";
+import type { FeedbackRecord, ProfileRecord, Tier } from "../domain/models.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { formatExternalId, nowIso } from "../utils/id.js";
 import { getDevTier } from "../utils/discord.js";
@@ -24,6 +24,12 @@ export class ProfileService {
     private readonly store: JsonStore,
     private readonly appConfig: AppConfig
   ) {}
+
+  private EMOJIS = {
+    full: "<:star_full:1488689485720981534>",
+    half: "<:star_half:1488689511104905216>",
+    empty: "<:star_empty:1488689461893140480>",
+  };
 
   async submitProfile(
     member: GuildMember,
@@ -74,6 +80,8 @@ export class ProfileService {
         completedContracts: 0,
         stoppedContracts: 0,
         disputeCount: 0,
+        feedbackCount: 0,
+        feedbackAverage: 0,
         status: "approved",
         approvedTier: initialTier,
         visibilityTiers: [initialTier],
@@ -120,28 +128,75 @@ export class ProfileService {
     return this.syncPublishedProfile(member, profile);
   }
 
-  async recordContractOutcome(member: GuildMember, outcome: "completed" | "stopped"): Promise<ProfileRecord | null> {
-    const profile = await this.store.mutate((draft) => {
-      const existing = draft.profiles.find((item) => item.userId === member.id);
-      if (!existing) {
-        return null;
+  async addFeedback(
+    member: GuildMember,
+    payload: {
+      jobId: string;
+      applicationId: string;
+      clientUserId: string;
+      jobTitle: string;
+      outcome: "completed" | "stopped";
+      score: number;
+      message: string;
+    }
+  ): Promise<FeedbackRecord> {
+    const result = await this.store.mutate((draft) => {
+      const profile = draft.profiles.find((item) => item.userId === member.id);
+      if (!profile) {
+        throw new Error(`Profile for ${member.id} was not found.`);
       }
 
-      if (outcome === "completed") {
-        existing.completedContracts += 1;
+      const application = draft.applications.find((item) => item.id === payload.applicationId);
+      if (!application) {
+        throw new Error(`Application ${payload.applicationId} was not found.`);
+      }
+
+      if (application.feedbackId) {
+        throw new Error(`Application ${payload.applicationId} already has feedback.`);
+      }
+
+      draft.counters.feedback += 1;
+      const created: FeedbackRecord = {
+        id: formatExternalId("FDB", draft.counters.feedback),
+        jobId: payload.jobId,
+        applicationId: payload.applicationId,
+        clientUserId: payload.clientUserId,
+        devUserId: member.id,
+        jobTitle: payload.jobTitle,
+        outcome: payload.outcome,
+        score: payload.score,
+        message: payload.message,
+        createdAt: nowIso()
+      };
+
+      draft.feedbacks.push(created);
+      application.feedbackId = created.id;
+
+      if (payload.outcome === "completed") {
+        profile.completedContracts += 1;
       } else {
-        existing.stoppedContracts += 1;
+        profile.stoppedContracts += 1;
       }
 
-      existing.updatedAt = nowIso();
-      return structuredClone(existing);
+      const trustDelta = (payload.score - 3) * 2 + (payload.outcome === "completed" ? 1 : -1);
+      profile.trustScore = Math.max(0, Math.min(100, profile.trustScore + trustDelta));
+
+      const profileFeedbacks = draft.feedbacks.filter((item) => item.devUserId === member.id);
+      const totalScore = profileFeedbacks.reduce((sum, item) => sum + item.score, 0);
+      profile.feedbackCount = profileFeedbacks.length;
+      profile.feedbackAverage =
+        profileFeedbacks.length > 0 ? Number((totalScore / profileFeedbacks.length).toFixed(2)) : 0;
+      profile.updatedAt = nowIso();
+
+      return {
+        feedback: structuredClone(created),
+        profile: structuredClone(profile)
+      };
     });
 
-    if (!profile) {
-      return null;
-    }
-
-    return this.syncPublishedProfile(member, profile);
+    const syncedProfile = await this.syncPublishedProfile(member, result.profile);
+    await this.postFeedbackToPublishedThreads(syncedProfile, result.feedback);
+    return result.feedback;
   }
 
   async getProfileByUserId(userId: string): Promise<ProfileRecord | null> {
@@ -234,11 +289,17 @@ export class ProfileService {
     if (existingThreadId) {
       const thread = await this.client.channels.fetch(existingThreadId).catch(() => null);
       if (thread?.isThread()) {
+        if (thread.archived) {
+          await thread.setArchived(false);
+        }
         const starterMessage = await thread.fetchStarterMessage().catch(() => null);
         if (starterMessage) {
           await starterMessage.edit({ content });
         }
         await thread.setName(title);
+        if (!thread.locked) {
+          await thread.setLocked(true);
+        }
         return thread.id;
       }
     }
@@ -248,6 +309,7 @@ export class ProfileService {
       autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
       message: { content }
     });
+    await created.setLocked(true);
 
     return created.id;
   }
@@ -260,6 +322,7 @@ export class ProfileService {
         : "- none";
     const stars = profile.moderatorStars > 0 ? "★".repeat(profile.moderatorStars) : "none";
     const memberSince = this.formatMemberSince(profile.networkRegisteredAt || profile.createdAt);
+    const clientRating = this.formatAverageStars(profile.feedbackAverage, profile.feedbackCount);
 
     return [
       `# ${member.displayName}`,
@@ -272,6 +335,7 @@ export class ProfileService {
       `**Completed Contracts:** ${profile.completedContracts}`,
       `**Stopped Contracts:** ${profile.stoppedContracts}`,
       `**Disputes:** ${profile.disputeCount}`,
+      `**Client Rating:** ${clientRating}`,
       `**Member Since:** ${memberSince}`,
       `**Skills:** ${skills}`,
       "",
@@ -283,6 +347,36 @@ export class ProfileService {
       "",
       "## Links",
       links
+    ].join("\n");
+  }
+
+  private async postFeedbackToPublishedThreads(profile: ProfileRecord, feedback: FeedbackRecord): Promise<void> {
+    const content = this.renderFeedbackMessage(feedback);
+    const threadIds = [...new Set(Object.values(profile.publishedPostIds).filter(Boolean))];
+
+    await Promise.all(
+      threadIds.map(async (threadId) => {
+        const thread = await this.client.channels.fetch(threadId).catch(() => null);
+        if (thread?.isThread()) {
+          await thread.send({ content });
+        }
+      })
+    );
+  }
+
+  private renderFeedbackMessage(feedback: FeedbackRecord): string {
+    const outcome = feedback.outcome === "completed" ? "Success" : "Fail";
+    const date = this.formatMemberSince(feedback.createdAt);
+    const message = feedback.message.trim();
+
+    return [
+      "## Client Feedback",
+      `**Job:** ${feedback.jobTitle}`,
+      `**Status:** ${outcome}`,
+      `**Client:** <@${feedback.clientUserId}>`,
+      `**Date:** ${date}`,
+      `**Rating:** ${this.formatScoreStars(feedback.score)}`,
+      ...(message ? ["", "### Feedback", message] : [])
     ].join("\n");
   }
 
@@ -308,5 +402,36 @@ export class ProfileService {
       month: "short",
       day: "numeric"
     }).format(parsed);
+  }
+
+  private formatScoreStars(score: number): string {
+    const safeScore = Math.max(1, Math.min(5, Math.round(score)));
+  
+    return `${this.EMOJIS.full.repeat(safeScore)}${this.EMOJIS.empty.repeat(5 - safeScore)} ${safeScore}/5`;
+  }
+  
+  private formatAverageStars(average: number, count: number): string {
+    if (count === 0) {
+      return "N/A";
+    }
+  
+    // round to nearest 0.5
+    const rounded = Math.round(average * 2) / 2;
+  
+    const full = Math.floor(rounded);
+    const hasHalf = rounded % 1 !== 0;
+  
+    let stars = "";
+  
+    stars += this.EMOJIS.full.repeat(full);
+  
+    if (hasHalf) {
+      stars += this.EMOJIS.half;
+    }
+  
+    const totalStars = full + (hasHalf ? 1 : 0);
+    stars += this.EMOJIS.empty.repeat(5 - totalStars);
+  
+    return `${stars} ${average.toFixed(1)}/5 from ${count}`;
   }
 }
