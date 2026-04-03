@@ -1,0 +1,34 @@
+Trust Contract Transcript Export
+Generated At: 2026-04-03T18:46:05.273Z
+Guild: Trust Contract
+Job: JOB-0003 - React DEV
+Application: APP-0003
+Outcome: stopped
+Feedback Score: 2/5
+Feedback Message: very bad quality, I stop
+
+================================================================================
+# Contract Room APP-0003
+Channel: #app-tkt-0003 (1489697180225896519)
+Developer: 1310699363864940645
+Entry: developer_apply
+Status Before Cleanup: hired
+Messages: 1
+
+[2026-04-03T18:44:45.707Z] Contract-Agent (1484195910249484399)
+# APP-0003 conversation
+
+**Entry:** developer application
+**Job:** JOB-0003 - React DEV
+**Market:** Silver
+**Client:** <@1481872063387144202>
+**Talent:** <@1310699363864940645>
+**Status:** hired
+**Profile:** Senior React Developer
+**Talent Tier:** Silver
+**Profile Skills:** react, react-native, javascript, python, golang, AI/ML
+**Room:** <#1489697180225896519>
+
+### Pitch
+can
+

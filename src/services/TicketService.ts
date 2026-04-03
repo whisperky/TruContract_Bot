@@ -97,6 +97,10 @@ export class TicketService {
     return channel;
   }
 
+  async fetchTextChannelOrNull(channelId: string): Promise<TextChannel | null> {
+    return this.fetchTextChannel(channelId).catch(() => null);
+  }
+
   async lockTextChannel(channelId: string, participantIds: string[]): Promise<void> {
     const channel = await this.fetchTextChannel(channelId);
     const uniqueParticipantIds = [...new Set(participantIds)];
@@ -116,6 +120,29 @@ export class TicketService {
 
     await channel.permissionOverwrites.edit(channel.guild.roles.everyone.id, {
       ViewChannel: false
+    });
+  }
+
+  async closeAndDeleteTextChannels(channelIds: string[]): Promise<void> {
+    const uniqueChannelIds = [...new Set(channelIds.filter(Boolean))];
+    if (uniqueChannelIds.length === 0) {
+      return;
+    }
+
+    await Promise.all(
+      uniqueChannelIds.map(async (channelId) => {
+        const channel = await this.fetchTextChannelOrNull(channelId);
+        await channel?.delete().catch(() => undefined);
+      })
+    );
+
+    await this.store.mutate((draft) => {
+      const closedAt = nowIso();
+      for (const ticket of draft.tickets) {
+        if (uniqueChannelIds.includes(ticket.channelId) && !ticket.closedAt) {
+          ticket.closedAt = closedAt;
+        }
+      }
     });
   }
 }

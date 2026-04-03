@@ -104,6 +104,11 @@ export class JobService {
     });
   }
 
+  async listApplicationsByJob(jobId: string): Promise<ApplicationRecord[]> {
+    const snapshot = await this.store.get();
+    return snapshot.applications.filter((application) => application.jobId === jobId);
+  }
+
   async getApplication(applicationId: string): Promise<ApplicationRecord | null> {
     const snapshot = await this.store.get();
     return snapshot.applications.find((application) => application.id === applicationId) ?? null;
@@ -132,6 +137,33 @@ export class JobService {
       application.privateMessageId = privateMessageId;
       application.updatedAt = nowIso();
       return structuredClone(application);
+    });
+  }
+
+  async clearApplicationPrivateConversation(applicationId: string): Promise<ApplicationRecord> {
+    return this.store.mutate((draft) => {
+      const application = draft.applications.find((item) => item.id === applicationId);
+      if (!application) {
+        throw new Error(`Application ${applicationId} was not found.`);
+      }
+
+      delete application.privateChannelId;
+      delete application.privateMessageId;
+      application.updatedAt = nowIso();
+      return structuredClone(application);
+    });
+  }
+
+  async clearJobPrivateChannel(jobId: string): Promise<JobRecord> {
+    return this.store.mutate((draft) => {
+      const job = draft.jobs.find((item) => item.id === jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} was not found.`);
+      }
+
+      job.privateChannelId = "";
+      job.updatedAt = nowIso();
+      return structuredClone(job);
     });
   }
 
@@ -299,11 +331,32 @@ export class JobService {
       throw new Error(`Job ${jobId} was not found.`);
     }
 
+    const hasActiveHire = snapshot.applications.some(
+      (application) => application.jobId === jobId && application.status === "hired"
+    );
+    if (hasActiveHire) {
+      throw new Error(`Job ${jobId} still has an active hire.`);
+    }
+
     await this.store.mutate((draft) => {
       const existing = draft.jobs.find((item) => item.id === jobId);
-      if (existing) {
-        existing.status = "closed";
-        existing.updatedAt = nowIso();
+      if (!existing) {
+        return;
+      }
+
+      const now = nowIso();
+      existing.status = "closed";
+      existing.updatedAt = now;
+
+      for (const application of draft.applications) {
+        if (application.jobId !== jobId) {
+          continue;
+        }
+
+        if (["submitted", "connected", "shortlisted", "approved"].includes(application.status)) {
+          application.status = "closed";
+          application.updatedAt = now;
+        }
       }
     });
 
@@ -586,17 +639,23 @@ export class JobService {
     ].join("\n");
   }
 
-  buildApplicationReviewButtons(application: ApplicationRecord): ActionRowBuilder<ButtonBuilder>[] {
+  buildApplicationReviewButtons(
+    application: ApplicationRecord,
+    jobStatus: JobRecord["status"]
+  ): ActionRowBuilder<ButtonBuilder>[] {
     if (application.status !== "submitted") {
       return [];
     }
+
+    const connectDisabled = jobStatus === "in_progress";
 
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId(`application|connect|${application.id}`)
-          .setLabel("Connect")
-          .setStyle(ButtonStyle.Success),
+          .setLabel(connectDisabled ? "Connect Unavailable" : "Connect")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(connectDisabled),
         new ButtonBuilder()
           .setCustomId(`application|reject|${application.id}`)
           .setLabel("Reject")
@@ -639,14 +698,20 @@ export class JobService {
     return lines.join("\n");
   }
 
-  buildApplicationConversationButtons(application: ApplicationRecord): ActionRowBuilder<ButtonBuilder>[] {
+  buildApplicationConversationButtons(
+    application: ApplicationRecord,
+    jobStatus: JobRecord["status"]
+  ): ActionRowBuilder<ButtonBuilder>[] {
     if (application.status === "connected") {
+      const hireDisabled = jobStatus === "in_progress";
+
       return [
         new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
             .setCustomId(`application|hire|${application.id}`)
-            .setLabel("Hire")
-            .setStyle(ButtonStyle.Success),
+            .setLabel(hireDisabled ? "Hire Unavailable" : "Hire")
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(hireDisabled),
           new ButtonBuilder()
             .setCustomId(`application|close|${application.id}`)
             .setLabel("Close")

@@ -1,6 +1,8 @@
 import {
   ActionRowBuilder,
+  type AttachmentBuilder,
   ButtonBuilder,
+  ButtonStyle,
   Client,
   Events,
   type Guild,
@@ -22,6 +24,7 @@ import { AccessService } from "../services/AccessService.js";
 import { JobService } from "../services/JobService.js";
 import { ProfileService } from "../services/ProfileService.js";
 import { TicketService } from "../services/TicketService.js";
+import { TranscriptService } from "../services/TranscriptService.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { isStaff } from "../utils/discord.js";
 import { buildSafetyDeskComponents, buildSafetyDeskEmbed } from "./panels.js";
@@ -32,6 +35,7 @@ export class TrustContractBot {
   private readonly access: AccessService;
   private readonly profiles: ProfileService;
   private readonly jobs: JobService;
+  private readonly transcripts: TranscriptService;
 
   constructor(
     private readonly appConfig: AppConfig,
@@ -45,6 +49,7 @@ export class TrustContractBot {
     this.access = new AccessService(store, appConfig);
     this.profiles = new ProfileService(this.client, store, appConfig, this.access);
     this.jobs = new JobService(this.client, store, appConfig);
+    this.transcripts = new TranscriptService(this.client, appConfig);
   }
 
   start(): void {
@@ -475,7 +480,7 @@ export class TrustContractBot {
       };
       const privateMessageId = await this.upsertChannelMessage(room, undefined, {
         content: this.jobs.renderApplicationConversationCard(job, connectedApplication, profile),
-        components: this.jobs.buildApplicationConversationButtons(connectedApplication)
+        components: this.jobs.buildApplicationConversationButtons(connectedApplication, job.status)
       });
 
       await this.jobs.connectApplication(application.id, room.id, privateMessageId);
@@ -508,10 +513,17 @@ export class TrustContractBot {
         return;
       }
 
+      if (job.status === "in_progress") {
+        await interaction.reply({
+          content: "This job has an active hire. Use Complete or Stop from the contract room instead.",
+          ephemeral: true
+        });
+        return;
+      }
+
       await interaction.deferReply({ ephemeral: true });
       await this.jobs.closeJob(entityId);
-      const room = await this.tickets.fetchTextChannel(job.privateChannelId);
-      await room.send(`Job ${job.id} is now closed.`);
+      await this.cleanupJobConversationRooms(entityId);
       await interaction.editReply(`Closed ${job.id}.`);
       return;
     }
@@ -562,6 +574,11 @@ export class TrustContractBot {
       return;
     }
 
+    if (scope === "application_finalize" && action && entityId) {
+      await this.handleApplicationFinalizeChoice(interaction, action, entityId, extra);
+      return;
+    }
+
     await interaction.reply({
       content: "Unknown button action.",
       ephemeral: true
@@ -578,7 +595,7 @@ export class TrustContractBot {
     }
 
     const guild = interaction.guild ?? (await this.client.guilds.fetch(interaction.guildId));
-    const [scope, action, entityId] = interaction.customId.split("|");
+    const [scope, action, entityId, extra] = interaction.customId.split("|");
 
     if (scope === "modal" && action === "new_job") {
       const marketTier = this.parseTier(entityId);
@@ -790,10 +807,24 @@ export class TrustContractBot {
       const outcome = action === "feedback_completed" ? "completed" : "stopped";
 
       await interaction.deferReply({ ephemeral: true });
-      await this.finalizeApplicationWithFeedback(guild, application, job, outcome, score, feedbackMessage);
-      await interaction.editReply(
-        `${outcome === "completed" ? "Completed" : "Stopped"} ${application.id} and saved feedback ${this.formatScoreStars(score)}.`
+      const transcript = await this.finalizeApplicationWithFeedback(
+        guild,
+        application,
+        job,
+        outcome,
+        score,
+        feedbackMessage,
+        extra === "export"
       );
+      await interaction.editReply({
+        content: [
+          `${outcome === "completed" ? "Completed" : "Stopped"} ${application.id} and saved feedback ${this.formatScoreStars(score)}.`,
+          transcript ? `Transcript attached: ${transcript.filename}` : undefined
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        files: transcript ? [transcript.attachment] : []
+      });
       return;
     }
 
@@ -883,7 +914,7 @@ export class TrustContractBot {
         };
         const privateMessageId = await this.upsertChannelMessage(room, undefined, {
           content: this.jobs.renderApplicationConversationCard(job, connectedApplication, profile),
-          components: this.jobs.buildApplicationConversationButtons(connectedApplication)
+          components: this.jobs.buildApplicationConversationButtons(connectedApplication, job.status)
         });
 
         await this.jobs.connectApplication(application.id, room.id, privateMessageId);
@@ -944,7 +975,7 @@ export class TrustContractBot {
         await interaction.deferReply({ ephemeral: true });
         const result = await this.jobs.hireApplication(application.id);
         await this.jobs.refreshPublishedJobPosts(result.job.id);
-        await this.syncApplicationMessages(application.id);
+        await this.syncJobApplicationMessages(result.job.id);
         await interaction.editReply(`Marked ${application.id} as hired.`);
         return;
       }
@@ -968,9 +999,7 @@ export class TrustContractBot {
 
         await interaction.deferReply({ ephemeral: true });
         await this.jobs.closeApplicationConversation(application.id);
-        if (application.privateChannelId) {
-          await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
-        }
+        await this.cleanupApplicationConversationRoom(application.id);
         await this.syncApplicationMessages(application.id);
         await interaction.editReply(`Closed conversation for ${application.id}.`);
         return;
@@ -993,7 +1022,12 @@ export class TrustContractBot {
           return;
         }
 
-        await interaction.showModal(buildApplicationFeedbackModal(application.id, "completed"));
+        await interaction.reply({
+          content:
+            "Export transcripts before completing this job? Export will include the job room and every application room that will be deleted.",
+          components: buildFinalizeTranscriptChoiceComponents(application.id, "completed"),
+          ephemeral: true
+        });
         return;
       }
 
@@ -1014,7 +1048,11 @@ export class TrustContractBot {
           return;
         }
 
-        await interaction.showModal(buildApplicationFeedbackModal(application.id, "stopped"));
+        await interaction.reply({
+          content: "Export the current contract transcript before stopping this hire?",
+          components: buildFinalizeTranscriptChoiceComponents(application.id, "stopped"),
+          ephemeral: true
+        });
         return;
       }
 
@@ -1024,6 +1062,60 @@ export class TrustContractBot {
           ephemeral: true
         });
     }
+  }
+
+  private async handleApplicationFinalizeChoice(
+    interaction: ButtonInteraction,
+    outcome: string,
+    applicationId: string,
+    exportChoice: string | undefined
+  ): Promise<void> {
+    const normalizedOutcome = outcome === "completed" ? "completed" : outcome === "stopped" ? "stopped" : null;
+    if (!normalizedOutcome) {
+      await interaction.reply({
+        content: "Unknown finalization action.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    const application = await this.jobs.getApplication(applicationId);
+    if (!application) {
+      await interaction.reply({
+        content: `Application ${applicationId} was not found.`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    const job = await this.jobs.getJob(application.jobId);
+    if (!job) {
+      await interaction.reply({
+        content: `Job ${application.jobId} was not found.`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.user.id !== job.clientId) {
+      await interaction.reply({
+        content: "Only the client who owns the job can finalize this hire.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (application.status !== "hired") {
+      await interaction.reply({
+        content: "This hire is no longer in progress.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    await interaction.showModal(
+      buildApplicationFeedbackModal(application.id, normalizedOutcome, exportChoice === "export")
+    );
   }
 
   private async syncApplicationMessages(applicationId: string): Promise<void> {
@@ -1039,26 +1131,39 @@ export class TrustContractBot {
 
     const profile = await this.profiles.getProfileByUserId(application.devUserId);
 
-    const clientRoom = await this.tickets.fetchTextChannel(job.privateChannelId);
-    const reviewMessageId = await this.upsertChannelMessage(clientRoom, application.reviewMessageId, {
-      content: this.jobs.renderApplicationReviewCard(job, application, profile),
-      components: this.jobs.buildApplicationReviewButtons(application)
-    });
-    if (reviewMessageId !== application.reviewMessageId) {
-      await this.jobs.setApplicationReviewMessageId(application.id, reviewMessageId);
+    const clientRoom = job.privateChannelId ? await this.tickets.fetchTextChannelOrNull(job.privateChannelId) : null;
+    if (clientRoom) {
+      const reviewMessageId = await this.upsertChannelMessage(clientRoom, application.reviewMessageId, {
+        content: this.jobs.renderApplicationReviewCard(job, application, profile),
+        components: this.jobs.buildApplicationReviewButtons(application, job.status)
+      });
+      if (reviewMessageId !== application.reviewMessageId) {
+        await this.jobs.setApplicationReviewMessageId(application.id, reviewMessageId);
+      }
     }
 
     if (!application.privateChannelId) {
       return;
     }
 
-    const privateRoom = await this.tickets.fetchTextChannel(application.privateChannelId);
+    const privateRoom = await this.tickets.fetchTextChannelOrNull(application.privateChannelId);
+    if (!privateRoom) {
+      return;
+    }
+
     const privateMessageId = await this.upsertChannelMessage(privateRoom, application.privateMessageId, {
       content: this.jobs.renderApplicationConversationCard(job, application, profile),
-      components: this.jobs.buildApplicationConversationButtons(application)
+      components: this.jobs.buildApplicationConversationButtons(application, job.status)
     });
     if (privateMessageId !== application.privateMessageId) {
       await this.jobs.setApplicationPrivateMessageId(application.id, privateMessageId);
+    }
+  }
+
+  private async syncJobApplicationMessages(jobId: string): Promise<void> {
+    const applications = await this.jobs.listApplicationsByJob(jobId);
+    for (const application of applications) {
+      await this.syncApplicationMessages(application.id);
     }
   }
 
@@ -1100,8 +1205,18 @@ export class TrustContractBot {
     job: JobRecord,
     outcome: "completed" | "stopped",
     score: number,
-    feedbackMessage: string
-  ): Promise<void> {
+    feedbackMessage: string,
+    shouldExportTranscript: boolean
+  ): Promise<{ attachment: AttachmentBuilder; filename: string } | null> {
+    const applications =
+      shouldExportTranscript && outcome === "completed" ? await this.jobs.listApplicationsByJob(job.id) : [];
+    const transcript =
+      shouldExportTranscript
+        ? outcome === "completed"
+          ? await this.transcripts.exportJobClosureArchive(guild, job, applications, application, score, feedbackMessage)
+          : await this.transcripts.exportApplicationTranscript(guild, job, application, outcome, score, feedbackMessage)
+        : null;
+
     const devMember = await guild.members.fetch(application.devUserId).catch(() => null);
     if (!devMember) {
       throw new Error(`Developer ${application.devUserId} could not be found for feedback.`);
@@ -1125,11 +1240,53 @@ export class TrustContractBot {
       message: feedbackMessage
     });
 
-    if (application.privateChannelId) {
-      await this.tickets.lockTextChannel(application.privateChannelId, [job.clientId, application.devUserId]);
+    if (outcome === "completed") {
+      await this.cleanupJobConversationRooms(job.id);
+    } else {
+      await this.cleanupApplicationConversationRoom(application.id);
+      await this.syncJobApplicationMessages(job.id);
     }
 
-    await this.syncApplicationMessages(application.id);
+    return transcript
+      ? {
+          attachment: transcript.attachment,
+          filename: transcript.filename
+        }
+      : null;
+  }
+
+  private async cleanupApplicationConversationRoom(applicationId: string): Promise<void> {
+    const application = await this.jobs.getApplication(applicationId);
+    if (!application?.privateChannelId) {
+      return;
+    }
+
+    const channelId = application.privateChannelId;
+    await this.jobs.clearApplicationPrivateConversation(applicationId);
+    await this.tickets.closeAndDeleteTextChannels([channelId]);
+  }
+
+  private async cleanupJobConversationRooms(jobId: string): Promise<void> {
+    const job = await this.jobs.getJob(jobId);
+    if (!job) {
+      return;
+    }
+
+    const applications = await this.jobs.listApplicationsByJob(jobId);
+    const channelIds = applications.flatMap((application) => (application.privateChannelId ? [application.privateChannelId] : []));
+
+    await Promise.all(
+      applications
+        .filter((application) => application.privateChannelId)
+        .map((application) => this.jobs.clearApplicationPrivateConversation(application.id))
+    );
+
+    if (job.privateChannelId) {
+      channelIds.push(job.privateChannelId);
+      await this.jobs.clearJobPrivateChannel(job.id);
+    }
+
+    await this.tickets.closeAndDeleteTextChannels(channelIds);
   }
 
   private formatScoreStars(score: number): string {
@@ -1367,13 +1524,14 @@ function buildApplicationModal(jobId: string): ModalBuilder {
 
 function buildApplicationFeedbackModal(
   applicationId: string,
-  outcome: "completed" | "stopped"
+  outcome: "completed" | "stopped",
+  exportTranscript: boolean
 ): ModalBuilder {
   const title = outcome === "completed" ? "Complete Contract" : "Stop Contract";
   const messageLabel = outcome === "completed" ? "Feedback (optional)" : "Why it stopped? (optional)";
 
   return new ModalBuilder()
-    .setCustomId(`modal|feedback_${outcome}|${applicationId}`)
+    .setCustomId(`modal|feedback_${outcome}|${applicationId}|${exportTranscript ? "export" : "skip"}`)
     .setTitle(title)
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -1395,4 +1553,22 @@ function buildApplicationFeedbackModal(
           .setMaxLength(1000)
       )
     );
+}
+
+function buildFinalizeTranscriptChoiceComponents(
+  applicationId: string,
+  outcome: "completed" | "stopped"
+): ActionRowBuilder<ButtonBuilder>[] {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`application_finalize|${outcome}|${applicationId}|skip`)
+        .setLabel("Continue")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`application_finalize|${outcome}|${applicationId}|export`)
+        .setLabel("Export Transcript")
+        .setStyle(ButtonStyle.Secondary)
+    )
+  ];
 }

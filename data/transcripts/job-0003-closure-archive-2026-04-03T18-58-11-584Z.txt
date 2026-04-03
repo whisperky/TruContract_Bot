@@ -1,0 +1,86 @@
+Trust Contract Job Archive Export
+Generated At: 2026-04-03T18:58:11.584Z
+Guild: Trust Contract
+Job: JOB-0003 - React DEV
+Final Outcome: completed
+Completed Application: APP-0004
+Feedback Score: 4/5
+Feedback Message: goood
+
+================================================================================
+# Job Room JOB-0003
+Channel: #job-tkt-0003 (1489696850754666598)
+Client: 1481872063387144202
+Market: silver
+Status Before Cleanup: in_progress
+Messages: 3
+
+[2026-04-03T18:43:26.956Z] Contract-Agent (1484195910249484399)
+# JOB-0003 • React DEV
+
+**Market:** Silver
+**Status:** draft
+**Budget:** Not specified
+**Timeline:** Not specified
+**Skills:** Not specified
+**Visible In:** not published yet
+
+## Summary
+RESSSS
+
+## Published Posts
+- none yet
+
+[2026-04-03T18:44:09.643Z] Contract-Agent (1484195910249484399)
+## Application #001
+**Status:** stopped
+**Entry:** developer application
+**Market:** Silver
+**Talent:** <@1310699363864940645>
+**Profile:** Senior React Developer
+**Talent Tier:** Silver
+**Profile Skills:** react, react-native, javascript, python, golang, AI/ML
+
+### Pitch
+can
+
+[2026-04-03T18:57:08.084Z] Contract-Agent (1484195910249484399)
+## Application #002
+**Status:** hired
+**Entry:** developer application
+**Market:** Silver
+**Talent:** <@1204531995699449968>
+**Profile:** Software Engineer
+**Talent Tier:** Silver
+**Profile Skills:** react, javascript
+**Room:** <#1489700334002770031>
+
+### Pitch
+can
+
+
+================================================================================
+# Application Room APP-0004
+Channel: #app-tkt-0004 (1489700334002770031)
+Developer: 1204531995699449968
+Entry: developer_apply
+Status Before Cleanup: hired
+Messages: 1
+
+[2026-04-03T18:57:17.485Z] Contract-Agent (1484195910249484399)
+# APP-0004 conversation
+
+**Entry:** developer application
+**Job:** JOB-0003 - React DEV
+**Market:** Silver
+**Client:** <@1481872063387144202>
+**Talent:** <@1204531995699449968>
+**Status:** hired
+**Profile:** Software Engineer
+**Talent Tier:** Silver
+**Profile Skills:** react, javascript
+**Room:** <#1489700334002770031>
+
+### Pitch
+can
+
