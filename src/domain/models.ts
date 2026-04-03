@@ -1,4 +1,5 @@
 export type Tier = "gold" | "silver" | "copper";
+export type AccountKind = "client" | "developer";
 
 export type TicketKind =
   | "client_job"
@@ -22,6 +23,7 @@ export type ApplicationStatus =
   | "closed"
   | "approved"
   | "withdrawn";
+export type ApplicationOrigin = "developer_apply" | "client_invite";
 
 export interface ProfileRecord {
   id: string;
@@ -52,6 +54,7 @@ export interface ProfileRecord {
 export interface JobRecord {
   id: string;
   clientId: string;
+  marketTier: Tier;
   title: string;
   summary: string;
   skills: string[];
@@ -70,6 +73,7 @@ export interface ApplicationRecord {
   id: string;
   jobId: string;
   devUserId: string;
+  origin: ApplicationOrigin;
   pitch: string;
   matchingSkills: string[];
   rate: string;
@@ -97,6 +101,15 @@ export interface FeedbackRecord {
   createdAt: string;
 }
 
+export interface AccessRecord {
+  userId: string;
+  kinds: AccountKind[];
+  tier: Tier;
+  createdAt: string;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
 export interface TicketRecord {
   id: string;
   kind: TicketKind;
@@ -113,6 +126,7 @@ export interface StoreSchema {
   jobs: JobRecord[];
   applications: ApplicationRecord[];
   feedbacks: FeedbackRecord[];
+  access: AccessRecord[];
   tickets: TicketRecord[];
   counters: {
     profile: number;

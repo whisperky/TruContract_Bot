@@ -12,9 +12,10 @@ import {
 
 import type { AppConfig } from "../config.js";
 import type { FeedbackRecord, ProfileRecord, Tier } from "../domain/models.js";
+import { AccessService } from "./AccessService.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { formatExternalId, nowIso } from "../utils/id.js";
-import { getDevTier } from "../utils/discord.js";
+import { getTierLabel } from "../utils/tier.js";
 
 const PROFILE_TIERS: Tier[] = ["gold", "silver", "copper"];
 
@@ -22,7 +23,8 @@ export class ProfileService {
   constructor(
     private readonly client: Client,
     private readonly store: JsonStore,
-    private readonly appConfig: AppConfig
+    private readonly appConfig: AppConfig,
+    private readonly access: AccessService
   ) {}
 
   private EMOJIS = {
@@ -41,12 +43,13 @@ export class ProfileService {
       portfolioLinks: string[];
     }
   ): Promise<ProfileRecord> {
+    const access = await this.access.getAccess(member.id);
     const profile = await this.store.mutate((draft) => {
       const now = nowIso();
       const existing = draft.profiles.find((item) => item.userId === member.id);
-      const initialTier = existing?.approvedTier ?? getDevTier(member, this.appConfig);
-      if (!initialTier) {
-        throw new Error("A developer tier role is required before creating a public profile.");
+      const initialTier = existing?.approvedTier ?? access?.tier;
+      if (!initialTier || !access?.kinds.includes("developer")) {
+        throw new Error("Developer access must be granted before creating a public profile.");
       }
 
       if (existing) {
@@ -204,28 +207,28 @@ export class ProfileService {
     return snapshot.profiles.find((profile) => profile.userId === userId) ?? null;
   }
 
-  buildDeskEmbed(): EmbedBuilder {
+  buildDeskEmbed(tier: Tier): EmbedBuilder {
     return new EmbedBuilder()
-      .setTitle("Developer Desk")
+      .setTitle(`${getTierLabel(tier)} Developer Desk`)
       .setDescription(
         [
-          "Create or update your public developer profile.",
-          "Once submitted, the bot syncs your profile into your allowed network forum.",
-          "Clients discover published profiles through private ranked suggestions, not random forum scrolling."
+          `Manage your presence in the ${getTierLabel(tier)} market.`,
+          "Create or update your developer profile.",
+          "Clients discover published profiles through private ranked suggestions, not forum browsing."
         ].join("\n")
       )
       .setColor(0x2b90d9);
   }
 
-  buildDeskComponents(): ActionRowBuilder<ButtonBuilder>[] {
+  buildDeskComponents(tier: Tier): ActionRowBuilder<ButtonBuilder>[] {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId("desk|dev_profile")
+          .setCustomId(`desk|dev_profile|${tier}`)
           .setLabel("Create / Update Profile")
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
-          .setCustomId("desk|my_applications")
+          .setCustomId(`desk|my_applications|${tier}`)
           .setLabel("My Applications")
           .setStyle(ButtonStyle.Secondary)
       )

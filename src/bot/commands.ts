@@ -15,6 +15,36 @@ export const slashCommands = [
     .setDescription("Deploy the client, developer, and safety desk panels.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
   new SlashCommandBuilder()
+    .setName("access-set")
+    .setDescription("Set a member's private marketplace access and neutral network tier.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addUserOption((option) =>
+      option.setName("user").setDescription("Server member").setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("access")
+        .setDescription("Which marketplace identity this member should have")
+        .setRequired(true)
+        .addChoices(
+          { name: "Client", value: "client" },
+          { name: "Developer", value: "developer" },
+          { name: "Both", value: "both" },
+          { name: "Revoke", value: "revoke" }
+        )
+    )
+    .addStringOption((option) =>
+      option
+        .setName("tier")
+        .setDescription("Neutral network tier to assign")
+        .setRequired(false)
+        .addChoices(
+          { name: "Gold", value: "gold" },
+          { name: "Silver", value: "silver" },
+          { name: "Copper", value: "copper" }
+        )
+    ),
+  new SlashCommandBuilder()
     .setName("profile-approve")
     .setDescription("Review a developer profile, update trust, and sync it to the right talent forum.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)

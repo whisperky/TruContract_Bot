@@ -10,27 +10,38 @@ import {
 } from "discord.js";
 
 import type { AppConfig } from "../config.js";
-import type { ApplicationRecord, FeedbackRecord, JobRecord, ProfileRecord, Tier } from "../domain/models.js";
+import type {
+  ApplicationOrigin,
+  ApplicationRecord,
+  FeedbackRecord,
+  JobRecord,
+  ProfileRecord,
+  Tier
+} from "../domain/models.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { formatExternalId, nowIso } from "../utils/id.js";
 import { overlapScore, tokenize } from "../utils/text.js";
+import { getEligibleAccountTiersForMarket, getTierLabel } from "../utils/tier.js";
 
 export class JobService {
+  readonly ACTIVE_APPLICATION_STATUSES = new Set<ApplicationRecord["status"]>(["submitted", "connected", "hired"]);
+
   constructor(
     private readonly client: Client,
     private readonly store: JsonStore,
     private readonly appConfig: AppConfig
   ) {}
 
-  private EMOJIS = {
+  private readonly EMOJIS = {
     full: "<:star_full:1488689485720981534>",
     half: "<:star_half:1488689511104905216>",
-    empty: "<:star_empty:1488689461893140480>",
+    empty: "<:star_empty:1488689461893140480>"
   };
 
   async createJob(
     clientUserId: string,
     privateChannelId: string,
+    marketTier: Tier,
     payload: {
       title: string;
       summary: string;
@@ -45,6 +56,7 @@ export class JobService {
       const record: JobRecord = {
         id: formatExternalId("JOB", draft.counters.job),
         clientId: clientUserId,
+        marketTier,
         title: payload.title,
         summary: payload.summary,
         skills: payload.skills,
@@ -68,14 +80,28 @@ export class JobService {
     return snapshot.jobs.find((job) => job.id === jobId) ?? null;
   }
 
-  async listJobsByClient(clientId: string): Promise<JobRecord[]> {
+  async listJobsByClient(clientId: string, marketTier?: Tier): Promise<JobRecord[]> {
     const snapshot = await this.store.get();
-    return snapshot.jobs.filter((job) => job.clientId === clientId);
+    return snapshot.jobs.filter(
+      (job) => job.clientId === clientId && (!marketTier || job.marketTier === marketTier)
+    );
   }
 
-  async listApplicationsByDeveloper(devUserId: string): Promise<ApplicationRecord[]> {
+  async listApplicationsByDeveloper(devUserId: string, marketTier?: Tier): Promise<ApplicationRecord[]> {
     const snapshot = await this.store.get();
-    return snapshot.applications.filter((application) => application.devUserId === devUserId);
+    const jobsById = new Map(snapshot.jobs.map((job) => [job.id, job]));
+
+    return snapshot.applications.filter((application) => {
+      if (application.devUserId !== devUserId) {
+        return false;
+      }
+
+      if (!marketTier) {
+        return true;
+      }
+
+      return jobsById.get(application.jobId)?.marketTier === marketTier;
+    });
   }
 
   async getApplication(applicationId: string): Promise<ApplicationRecord | null> {
@@ -183,17 +209,18 @@ export class JobService {
       }
 
       application.status = "stopped";
-      job.status = job.visibilityTiers.length > 0 ? "published" : "draft";
+      job.status = job.publishedPostIds[job.marketTier] ? "published" : "draft";
     });
   }
 
-  async publishJob(jobId: string, tier: Tier): Promise<string> {
+  async publishJob(jobId: string): Promise<string> {
     const snapshot = await this.store.get();
     const job = snapshot.jobs.find((item) => item.id === jobId);
     if (!job) {
       throw new Error(`Job ${jobId} was not found.`);
     }
 
+    const tier = job.marketTier;
     const forumChannel = await this.client.channels.fetch(this.appConfig.forums.opportunities[tier]);
     if (!forumChannel || forumChannel.type !== ChannelType.GuildForum) {
       throw new Error(`Opportunity forum for ${tier} is missing or invalid.`);
@@ -207,7 +234,7 @@ export class JobService {
     };
     const publicThreadName = this.buildPublicJobThreadName(publishedJob);
     const existingThreadId = job.publishedPostIds[tier];
-    const content = this.renderPublicJobPost(publishedJob, tier);
+    const content = this.renderPublicJobPost(publishedJob);
     const components = this.buildPublicJobComponents(publishedJob);
 
     let threadId: string;
@@ -306,6 +333,7 @@ export class JobService {
       rate: string;
       availability: string;
       privateChannelId?: string;
+      origin?: ApplicationOrigin;
     }
   ): Promise<ApplicationRecord> {
     return this.store.mutate((draft) => {
@@ -314,12 +342,23 @@ export class JobService {
         throw new Error(`Job ${jobId} was not found.`);
       }
 
+      const existingActive = draft.applications.find(
+        (item) =>
+          item.jobId === jobId &&
+          item.devUserId === devUserId &&
+          this.ACTIVE_APPLICATION_STATUSES.has(item.status)
+      );
+      if (existingActive) {
+        throw new Error(`This candidate already has an active application for ${jobId}.`);
+      }
+
       draft.counters.application += 1;
       const now = nowIso();
       const created: ApplicationRecord = {
         id: formatExternalId("APP", draft.counters.application),
         jobId,
         devUserId,
+        origin: payload.origin ?? "developer_apply",
         pitch: payload.pitch,
         matchingSkills: payload.matchingSkills,
         rate: payload.rate,
@@ -378,12 +417,10 @@ export class JobService {
   }
 
   async suggestProfiles(
-    jobId: string,
-    allowedTiers: Tier[]
+    jobId: string
   ): Promise<
     Array<{
       profile: ProfileRecord;
-      threadId: string;
       score: number;
       fitScore: number;
       trustScore: number;
@@ -399,10 +436,22 @@ export class JobService {
     }
 
     const jobTokens = tokenize([job.title, job.summary, job.skills.join(" ")].join(" "));
+    const eligibleTiers = new Set(getEligibleAccountTiersForMarket(job.marketTier));
     const ranked = snapshot.profiles
       .map((profile) => {
-        const threadId = this.getVisibleProfileThreadId(profile, allowedTiers);
-        if (!threadId || profile.status !== "approved") {
+        const hasActiveApplication = snapshot.applications.some(
+          (application) =>
+            application.jobId === job.id &&
+            application.devUserId === profile.userId &&
+            this.ACTIVE_APPLICATION_STATUSES.has(application.status)
+        );
+        const profileTier = profile.approvedTier;
+        if (
+          hasActiveApplication ||
+          !profileTier ||
+          !eligibleTiers.has(profileTier) ||
+          profile.status !== "approved"
+        ) {
           return null;
         }
 
@@ -413,7 +462,6 @@ export class JobService {
           .slice(0, 2);
         return {
           profile,
-          threadId,
           recentFeedbacks,
           ...scored
         };
@@ -425,61 +473,69 @@ export class JobService {
     return ranked;
   }
 
-  buildClientDeskEmbed(): EmbedBuilder {
+  buildSuggestionInviteButtons(
+    jobId: string,
+    devUserId: string,
+    disabled = false
+  ): ActionRowBuilder<ButtonBuilder>[] {
+    return [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`job|invite|${jobId}|${devUserId}`)
+          .setLabel(disabled ? "Invited" : "Invite To Chat")
+          .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Success)
+          .setDisabled(disabled)
+      )
+    ];
+  }
+
+  buildClientDeskEmbed(tier: Tier): EmbedBuilder {
     return new EmbedBuilder()
-      .setTitle("Client Desk")
+      .setTitle(`${getTierLabel(tier)} Client Desk`)
       .setDescription(
         [
-          "Open a private client room and let the bot publish anonymized job posts for you.",
+          `Create jobs for the ${getTierLabel(tier)} market and publish them into the ${getTierLabel(tier)} opportunities channel.`,
           "Your identity and search history stay private.",
-          "Use this desk for new jobs, shortlist requests, and privacy issues."
+          "This desk only manages jobs scoped to this network tier."
         ].join("\n")
       )
       .setColor(0x00a86b);
   }
 
-  buildClientDeskComponents(): ActionRowBuilder<ButtonBuilder>[] {
+  buildClientDeskComponents(tier: Tier): ActionRowBuilder<ButtonBuilder>[] {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId("desk|new_job")
+          .setCustomId(`desk|new_job|${tier}`)
           .setLabel("New Job")
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
-          .setCustomId("desk|my_jobs")
+          .setCustomId(`desk|my_jobs|${tier}`)
           .setLabel("My Jobs")
           .setStyle(ButtonStyle.Secondary)
       )
     ];
   }
 
-  buildJobManagementButtons(jobId: string): ActionRowBuilder<ButtonBuilder>[] {
+  buildJobManagementButtons(job: JobRecord): ActionRowBuilder<ButtonBuilder>[] {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`job|publish|${jobId}|gold`)
-          .setLabel("Publish Gold")
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(`job|publish|${jobId}|silver`)
-          .setLabel("Publish Silver")
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(`job|publish|${jobId}|copper`)
-          .setLabel("Publish Copper")
+          .setCustomId(`job|publish|${job.id}`)
+          .setLabel(`Publish ${getTierLabel(job.marketTier)}`)
           .setStyle(ButtonStyle.Primary)
       ),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`job|suggest|${jobId}`)
+          .setCustomId(`job|suggest|${job.id}`)
           .setLabel("Suggest Developers")
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
-          .setCustomId(`job|shortlist|${jobId}`)
+          .setCustomId(`job|shortlist|${job.id}`)
           .setLabel("Request Shortlist")
           .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
-          .setCustomId(`job|close|${jobId}`)
+          .setCustomId(`job|close|${job.id}`)
           .setLabel("Close Job")
           .setStyle(ButtonStyle.Danger)
       )
@@ -512,16 +568,20 @@ export class JobService {
   renderApplicationReviewCard(
     job: JobRecord,
     application: ApplicationRecord,
-    profileThreadId: string | null
+    profile: ProfileRecord | null
   ): string {
+    const contextHeading = application.origin === "client_invite" ? "Invite Context" : "Pitch";
+
     return [
       `## Application ${this.formatApplicationSequence(job, application)}`,
       `**Status:** ${this.formatApplicationStatus(application.status)}`,
+      `**Entry:** ${this.formatApplicationOrigin(application.origin)}`,
+      `**Market:** ${getTierLabel(job.marketTier)}`,
       `**Talent:** <@${application.devUserId}>`,
-      `**Profile:** ${profileThreadId ? `<#${profileThreadId}>` : "not published"}`,
+      ...this.buildProfileSummaryLines(profile),
       ...this.buildApplicationDetailLines(application),
       "",
-      "### Pitch",
+      `### ${contextHeading}`,
       application.pitch
     ].join("\n");
   }
@@ -548,21 +608,35 @@ export class JobService {
   renderApplicationConversationCard(
     job: JobRecord,
     application: ApplicationRecord,
-    profileThreadId: string | null
+    profile: ProfileRecord | null
   ): string {
-    return [
+    const lines = [
       `# ${application.id} conversation`,
       "",
+      `**Entry:** ${this.formatApplicationOrigin(application.origin)}`,
       `**Job:** ${job.id} - ${job.title}`,
+      `**Market:** ${getTierLabel(job.marketTier)}`,
       `**Client:** <@${job.clientId}>`,
       `**Talent:** <@${application.devUserId}>`,
       `**Status:** ${this.formatApplicationStatus(application.status)}`,
-      `**Profile:** ${profileThreadId ? `<#${profileThreadId}>` : "not published"}`,
-      ...this.buildApplicationDetailLines(application),
-      "",
-      "### Pitch",
-      application.pitch
-    ].join("\n");
+      ...this.buildProfileSummaryLines(profile),
+      ...this.buildApplicationDetailLines(application)
+    ];
+
+    if (application.origin === "client_invite") {
+      lines.push(
+        "",
+        "### Invitation Context",
+        application.pitch,
+        "",
+        "### Job Overview",
+        job.summary
+      );
+    } else {
+      lines.push("", "### Pitch", application.pitch);
+    }
+
+    return lines.join("\n");
   }
 
   buildApplicationConversationButtons(application: ApplicationRecord): ActionRowBuilder<ButtonBuilder>[] {
@@ -600,7 +674,7 @@ export class JobService {
   }
 
   renderPrivateJobSummary(job: JobRecord): string {
-    const tiers = job.visibilityTiers.length > 0 ? job.visibilityTiers.join(", ") : "not published yet";
+    const visibleIn = job.visibilityTiers.length > 0 ? job.visibilityTiers.join(", ") : "not published yet";
     const publishedIds = Object.entries(job.publishedPostIds)
       .map(([tier, postId]) => `- ${tier}: ${postId}`)
       .join("\n");
@@ -611,11 +685,12 @@ export class JobService {
     return [
       `# ${job.id} • ${job.title}`,
       "",
+      `**Market:** ${getTierLabel(job.marketTier)}`,
       `**Status:** ${job.status}`,
       `**Budget:** ${budget}`,
       `**Timeline:** ${timeline}`,
       `**Skills:** ${skills}`,
-      `**Visible In:** ${tiers}`,
+      `**Visible In:** ${visibleIn}`,
       "",
       "## Summary",
       job.summary,
@@ -637,6 +712,7 @@ export class JobService {
       return [
         `${index + 1}. <@${application.devUserId}>`,
         `   - application: ${application.id}`,
+        `   - market: ${getTierLabel(job.marketTier)}`,
         `   - score: ${application.score ?? 0}`,
         `   - skills: ${application.matchingSkills.join(", ") || "none"}`,
         `   - rate: ${rate}`,
@@ -651,7 +727,6 @@ export class JobService {
     job: JobRecord,
     suggestions: Array<{
       profile: ProfileRecord;
-      threadId: string;
       score: number;
       fitScore: number;
       trustScore: number;
@@ -659,64 +734,61 @@ export class JobService {
       linkScore: number;
       recentFeedbacks: FeedbackRecord[];
     }>
-  ): string[] {
+  ): Array<{
+    content: string;
+    components: ActionRowBuilder<ButtonBuilder>[];
+  }> {
     if (suggestions.length === 0) {
-      return [`# ${job.id} suggestions\n\nNo published developer profiles matched this job yet.`];
+      return [
+        {
+          content: `# ${job.id} suggestions\n\nNo published developer profiles matched this ${getTierLabel(job.marketTier).toLowerCase()} market job yet.`,
+          components: []
+        }
+      ];
     }
 
-    const lines = suggestions.map((suggestion, index) => {
+    const messages = suggestions.map((suggestion, index) => {
       const skills = suggestion.profile.skills.join(", ") || "none";
-      const tier = suggestion.profile.approvedTier ?? "unassigned";
+      const tier = suggestion.profile.approvedTier ? getTierLabel(suggestion.profile.approvedTier) : "Unassigned";
       const rating = this.formatAverageStars(suggestion.profile.feedbackAverage, suggestion.profile.feedbackCount);
       const recentFeedbackLines = suggestion.recentFeedbacks.map((feedback) => {
         const status = feedback.outcome === "completed" ? "success" : "fail";
         const snippet = feedback.message ? ` - ${this.truncate(feedback.message, 80)}` : "";
-        return `   - feedback: ${this.formatScoreStars(feedback.score)} | ${status}${snippet}`;
+        return `- ${this.formatScoreStars(feedback.score)} | ${status}${snippet}`;
       });
 
-      return [
-        `${index + 1}. <@${suggestion.profile.userId}>`,
-        `   - profile: <#${suggestion.threadId}>`,
-        `   - title: ${suggestion.profile.headline}`,
-        `   - network: ${tier}`,
-        `   - total: ${suggestion.score}`,
-        `   - fit/trust/tenure/links: ${suggestion.fitScore}/${suggestion.trustScore}/${suggestion.tenureScore}/${suggestion.linkScore}`,
-        `   - rating: ${rating}`,
-        `   - skills: ${skills}`,
-        ...recentFeedbackLines
-      ].join("\n");
+      const contentLines = [
+        `## Candidate #${(index + 1).toString().padStart(3, "0")}`,
+        `**Title:** ${suggestion.profile.headline}`,
+        `**Network:** ${tier}`,
+        `**Total Score:** ${suggestion.score}`,
+        `**Fit / Trust / Tenure / Links:** ${suggestion.fitScore} / ${suggestion.trustScore} / ${suggestion.tenureScore} / ${suggestion.linkScore}`,
+        `**Client Rating:** ${rating}`,
+        `**Skills:** ${skills}`
+      ];
+
+      if (recentFeedbackLines.length > 0) {
+        contentLines.push("", "### Recent Feedback", ...recentFeedbackLines);
+      }
+
+      return {
+        content: contentLines.join("\n"),
+        components: this.buildSuggestionInviteButtons(job.id, suggestion.profile.userId)
+      };
     });
 
-    const chunks: string[] = [];
-    for (let index = 0; index < lines.length; index += 10) {
-      const chunkLines = lines.slice(index, index + 10);
-      const title = index === 0 ? `# ${job.id} suggestions` : `# ${job.id} suggestions (cont.)`;
-      chunks.push([title, "", ...chunkLines].join("\n"));
-    }
-
-    return chunks;
-  }
-
-  private renderPublicJobPost(job: JobRecord, tier: Tier): string {
-    const budget = job.budget || "N/A";
-    const timeline = job.timeline || "N/A";
-    const skills = this.formatPublicSkillTags(job.skills);
-
     return [
-      `# ${job.title}`,
-      "",
-      `**Network:** ${this.getTierBadge(tier)}`,
-      "",
-      `**Budget:** ${budget}`,
-      `**Timeline:** ${timeline}`,
-      `**Skills:** ${skills}`,
-      "",
-      "## Overview",
-      job.summary,
-      "",
-      `**Status:** ${this.getPublicStatusBadge(job.status)}`,
-      ""
-    ].join("\n");
+      {
+        content: [
+          `# ${job.id} suggestions`,
+          "",
+          `Matched for the ${getTierLabel(job.marketTier)} market.`,
+          "Developer identities stay hidden until you invite a candidate into a shared room."
+        ].join("\n"),
+        components: []
+      },
+      ...messages
+    ];
   }
 
   async refreshPublishedJobPosts(jobId: string): Promise<void> {
@@ -726,7 +798,7 @@ export class JobService {
     }
 
     await Promise.all(
-      Object.entries(job.publishedPostIds).map(async ([tier, threadId]) => {
+      Object.entries(job.publishedPostIds).map(async ([, threadId]) => {
         if (!threadId) {
           return;
         }
@@ -743,7 +815,7 @@ export class JobService {
 
         await thread.setName(this.buildPublicJobThreadName(job)).catch(() => undefined);
         await starterMessage.edit({
-          content: this.renderPublicJobPost(job, tier as Tier),
+          content: this.renderPublicJobPost(job),
           embeds: [],
           components: this.buildPublicJobComponents(job)
         });
@@ -751,8 +823,30 @@ export class JobService {
     );
   }
 
+  private renderPublicJobPost(job: JobRecord): string {
+    const budget = job.budget || "N/A";
+    const timeline = job.timeline || "N/A";
+    const skills = this.formatPublicSkillTags(job.skills);
+
+    return [
+      `# ${job.title}`,
+      "",
+      `**Network:** ${this.getTierBadge(job.marketTier)}`,
+      "",
+      `**Budget:** ${budget}`,
+      `**Timeline:** ${timeline}`,
+      `**Skills:** ${skills}`,
+      "",
+      "## Overview",
+      job.summary,
+      "",
+      `**Status:** ${this.getPublicStatusBadge(job.status)}`,
+      ""
+    ].join("\n");
+  }
+
   private buildApplicationDetailLines(application: ApplicationRecord): string[] {
-    const lines = [];
+    const lines: string[] = [];
 
     if (application.privateChannelId) {
       lines.push(`**Room:** <#${application.privateChannelId}>`);
@@ -769,6 +863,21 @@ export class JobService {
     return lines;
   }
 
+  private buildProfileSummaryLines(profile: ProfileRecord | null): string[] {
+    if (!profile) {
+      return ["**Profile:** not published"];
+    }
+
+    const skills = profile.skills.length > 0 ? profile.skills.join(", ") : "none";
+    const tier = profile.approvedTier ? getTierLabel(profile.approvedTier) : "Unassigned";
+
+    return [
+      `**Profile:** ${profile.headline}`,
+      `**Talent Tier:** ${tier}`,
+      `**Profile Skills:** ${skills}`
+    ];
+  }
+
   private formatApplicationSequence(job: JobRecord, application: ApplicationRecord): string {
     const index = job.applicationIds.indexOf(application.id);
     if (index === -1) {
@@ -780,6 +889,10 @@ export class JobService {
 
   private formatApplicationStatus(status: ApplicationRecord["status"]): string {
     return status.replace(/_/g, " ");
+  }
+
+  private formatApplicationOrigin(origin: ApplicationOrigin): string {
+    return origin === "client_invite" ? "client invite" : "developer application";
   }
 
   private getPublicJobButtonLabel(status: JobRecord["status"]): string {
@@ -823,15 +936,15 @@ export class JobService {
   private getPublicStatusBadge(status: JobRecord["status"]): string {
     switch (status) {
       case "published":
-        return "🟢  Open";
+        return "🟢 Open";
       case "in_progress":
-        return "🟠  In progress";
+        return "🟠 In progress";
       case "closed":
-        return "🔴  Closed";
+        return "🔴 Closed";
       case "paused":
-        return "⏸️  Paused";
+        return "⏸️ Paused";
       case "draft":
-        return "📝  Preparing";
+        return "📝 Preparing";
     }
   }
 
@@ -913,17 +1026,6 @@ export class JobService {
     };
   }
 
-  private getVisibleProfileThreadId(profile: ProfileRecord, allowedTiers: Tier[]): string | null {
-    for (const tier of allowedTiers) {
-      const threadId = profile.publishedPostIds[tier];
-      if (threadId) {
-        return threadId;
-      }
-    }
-
-    return null;
-  }
-
   private getTenureScore(networkRegisteredAt: string): number {
     const createdAt = new Date(networkRegisteredAt);
     if (Number.isNaN(createdAt.getTime())) {
@@ -957,40 +1059,36 @@ export class JobService {
 
   private formatScoreStars(score: number): string {
     const safeScore = Math.max(1, Math.min(5, Math.round(score)));
-  
     return `${this.EMOJIS.full.repeat(safeScore)}${this.EMOJIS.empty.repeat(5 - safeScore)} ${safeScore}/5`;
   }
-  
+
   private formatAverageStars(average: number, count: number): string {
     if (count === 0) {
       return "N/A";
     }
-  
-    // round to nearest 0.5
+
     const rounded = Math.round(average * 2) / 2;
-  
     const full = Math.floor(rounded);
     const hasHalf = rounded % 1 !== 0;
-  
+
     let stars = "";
-  
     stars += this.EMOJIS.full.repeat(full);
-  
+
     if (hasHalf) {
       stars += this.EMOJIS.half;
     }
-  
+
     const totalStars = full + (hasHalf ? 1 : 0);
     stars += this.EMOJIS.empty.repeat(5 - totalStars);
-  
+
     return `${stars} ${average.toFixed(1)}/5 from ${count}`;
   }
-  
+
   private truncate(value: string, maxLength: number): string {
     if (value.length <= maxLength) {
       return value;
     }
-  
+
     return `${value.slice(0, maxLength - 3)}...`;
   }
 }
