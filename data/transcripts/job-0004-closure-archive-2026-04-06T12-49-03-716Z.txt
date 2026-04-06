@@ -1,0 +1,102 @@
+Trust Contract Job Archive Export
+Generated At: 2026-04-06T12:49:03.716Z
+Guild: Trust Contract
+Job: JOB-0004 - Mobile Game Developer
+Final Outcome: completed
+Completed Application: APP-0005
+Feedback Score: Pending final feedback
+Feedback Message: Pending final feedback
+
+================================================================================
+# Job Room JOB-0004
+Channel: #job-tkt-0004 (1490693933553029122)
+Client: 1481872063387144202
+Market: silver
+Status Before Cleanup: in_progress
+Messages: 2
+
+[2026-04-06T12:45:30.573Z] Contract-Agent (1484195910249484399)
+# JOB-0004 • Mobile Game Developer
+
+**Market:** Silver
+**Status:** draft
+**Budget:** Not specified
+**Timeline:** Not specified
+**Skills:** Not specified
+**Visible In:** not published yet
+
+## Summary
+I need a mobile game developer for my idea comes true.
+
+## Published Posts
+- none yet
+
+[2026-04-06T12:46:33.909Z] Contract-Agent (1484195910249484399)
+## Application #001
+**Status:** hired
+**Entry:** developer application
+**Market:** Silver
+**Talent:** <@1310699363864940645>
+**Profile:** Senior React Developer
+**Talent Tier:** Silver
+**Profile Skills:** react, react-native, javascript, python, golang, AI/ML
+**Room:** <#1490694239254741144>
+**Rate:** 20 usd / hour
+
+### Pitch
+can do it.
+
+
+================================================================================
+# Application Room APP-0005
+Channel: #app-tkt-0005 (1490694239254741144)
+Developer: 1310699363864940645
+Entry: developer_apply
+Status Before Cleanup: hired
+Messages: 10
+
+[2026-04-06T12:46:43.309Z] Contract-Agent (1484195910249484399)
+# APP-0005 conversation
+
+**Entry:** developer application
+**Job:** JOB-0004 - Mobile Game Developer
+**Market:** Silver
+**Client:** <@1481872063387144202>
+**Talent:** <@1310699363864940645>
+**Status:** hired
+**Profile:** Senior React Developer
+**Talent Tier:** Silver
+**Profile Skills:** react, react-native, javascript, python, golang, AI/ML
+**Room:** <#1490694239254741144>
+**Rate:** 20 usd / hour
+
+### Pitch
+can do it.
+
+[2026-04-06T12:47:21.887Z] peace (1481872063387144202)
+[no text content]
+
+[2026-04-06T12:47:26.969Z] peace (1481872063387144202)
+[no text content]
+
+[2026-04-06T12:47:30.599Z] peace (1481872063387144202)
+[no text content]
+
+[2026-04-06T12:47:35.119Z] Peace (1310699363864940645)
+[no text content]
+
+[2026-04-06T12:47:37.074Z] Peace (1310699363864940645)
+[no text content]
+
+[2026-04-06T12:47:44.930Z] Peace (1310699363864940645)
+[no text content]
+
+[2026-04-06T12:47:51.233Z] peace (1481872063387144202)
+[no text content]
+
+[2026-04-06T12:48:00.041Z] peace (1481872063387144202)
+[no text content]
+
+[2026-04-06T12:48:02.051Z] peace (1481872063387144202)
+[no text content]
+

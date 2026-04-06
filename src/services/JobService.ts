@@ -80,6 +80,37 @@ export class JobService {
     return snapshot.jobs.find((job) => job.id === jobId) ?? null;
   }
 
+  async updateJob(
+    jobId: string,
+    payload: {
+      title: string;
+      summary: string;
+      skills: string[];
+      budget: string;
+      timeline: string;
+    }
+  ): Promise<JobRecord> {
+    return this.store.mutate((draft) => {
+      const job = draft.jobs.find((item) => item.id === jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} was not found.`);
+      }
+
+      if (job.status === "closed") {
+        throw new Error(`Job ${jobId} is already closed.`);
+      }
+
+      job.title = payload.title;
+      job.summary = payload.summary;
+      job.skills = payload.skills;
+      job.budget = payload.budget;
+      job.timeline = payload.timeline;
+      job.updatedAt = nowIso();
+
+      return structuredClone(job);
+    });
+  }
+
   async listJobsByClient(clientId: string, marketTier?: Tier): Promise<JobRecord[]> {
     const snapshot = await this.store.get();
     return snapshot.jobs.filter(
@@ -140,6 +171,45 @@ export class JobService {
     });
   }
 
+  async setJobPrivateMessageId(jobId: string, privateMessageId: string): Promise<JobRecord> {
+    return this.store.mutate((draft) => {
+      const job = draft.jobs.find((item) => item.id === jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} was not found.`);
+      }
+
+      job.privateMessageId = privateMessageId;
+      job.updatedAt = nowIso();
+      return structuredClone(job);
+    });
+  }
+
+  async setJobPrivateControlsMessageId(jobId: string, privateControlsMessageId: string): Promise<JobRecord> {
+    return this.store.mutate((draft) => {
+      const job = draft.jobs.find((item) => item.id === jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} was not found.`);
+      }
+
+      job.privateControlsMessageId = privateControlsMessageId;
+      job.updatedAt = nowIso();
+      return structuredClone(job);
+    });
+  }
+
+  async clearJobPrivateControlsMessageId(jobId: string): Promise<JobRecord> {
+    return this.store.mutate((draft) => {
+      const job = draft.jobs.find((item) => item.id === jobId);
+      if (!job) {
+        throw new Error(`Job ${jobId} was not found.`);
+      }
+
+      delete job.privateControlsMessageId;
+      job.updatedAt = nowIso();
+      return structuredClone(job);
+    });
+  }
+
   async clearApplicationPrivateConversation(applicationId: string): Promise<ApplicationRecord> {
     return this.store.mutate((draft) => {
       const application = draft.applications.find((item) => item.id === applicationId);
@@ -162,6 +232,8 @@ export class JobService {
       }
 
       job.privateChannelId = "";
+      delete job.privateMessageId;
+      delete job.privateControlsMessageId;
       job.updatedAt = nowIso();
       return structuredClone(job);
     });
@@ -571,26 +643,40 @@ export class JobService {
   }
 
   buildJobManagementButtons(job: JobRecord): ActionRowBuilder<ButtonBuilder>[] {
+    const canPublish = job.status !== "in_progress" && job.status !== "closed";
+    const canReviewCandidates = job.status === "published";
+    const canEdit = job.status !== "closed";
+    const canClose = job.status !== "closed" && job.status !== "in_progress";
+
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`job|publish|${job.id}`)
-          .setLabel(`Publish ${getTierLabel(job.marketTier)}`)
-          .setStyle(ButtonStyle.Primary)
-      ),
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        .setCustomId(`job|publish|${job.id}`)
+        .setLabel(`Publish ${getTierLabel(job.marketTier)}`)
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(!canPublish),
         new ButtonBuilder()
-          .setCustomId(`job|suggest|${job.id}`)
-          .setLabel("Suggest Developers")
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(`job|shortlist|${job.id}`)
-          .setLabel("Request Shortlist")
-          .setStyle(ButtonStyle.Success),
+          .setCustomId(`job|edit|${job.id}`)
+          .setLabel("Edit Job")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!canEdit),
         new ButtonBuilder()
           .setCustomId(`job|close|${job.id}`)
           .setLabel("Close Job")
           .setStyle(ButtonStyle.Danger)
+          .setDisabled(!canClose)
+      ),
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`job|shortlist|${job.id}`)
+          .setLabel("Review Applicants")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(!canReviewCandidates),
+        new ButtonBuilder()
+          .setCustomId(`job|suggest|${job.id}`)
+          .setLabel("Suggest Talent")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!canReviewCandidates)
       )
     ];
   }
@@ -703,6 +789,39 @@ export class JobService {
     jobStatus: JobRecord["status"]
   ): ActionRowBuilder<ButtonBuilder>[] {
     if (application.status === "connected") {
+      return [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`application|controls|${application.id}`)
+            .setLabel("Open Controls")
+            .setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder()
+            .setCustomId(`application|close|${application.id}`)
+            .setLabel("Leave Conversation")
+            .setStyle(ButtonStyle.Danger)
+        )
+      ];
+    }
+
+    if (application.status === "hired") {
+      return [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`application|controls|${application.id}`)
+            .setLabel("Open Controls")
+            .setStyle(ButtonStyle.Secondary)
+        )
+      ];
+    }
+
+    return [];
+  }
+
+  buildApplicationControlPanelButtons(
+    application: ApplicationRecord,
+    jobStatus: JobRecord["status"]
+  ): ActionRowBuilder<ButtonBuilder>[] {
+    if (application.status === "connected") {
       const hireDisabled = jobStatus === "in_progress";
 
       return [
@@ -711,11 +830,7 @@ export class JobService {
             .setCustomId(`application|hire|${application.id}`)
             .setLabel(hireDisabled ? "Hire Unavailable" : "Hire")
             .setStyle(ButtonStyle.Success)
-            .setDisabled(hireDisabled),
-          new ButtonBuilder()
-            .setCustomId(`application|close|${application.id}`)
-            .setLabel("Close")
-            .setStyle(ButtonStyle.Danger)
+            .setDisabled(hireDisabled)
         )
       ];
     }
@@ -762,6 +877,38 @@ export class JobService {
       "",
       "## Published Posts",
       publishedIds || "- none yet"
+    ].join("\n");
+  }
+
+  renderSmartPrivateJobSummary(job: JobRecord, applications: ApplicationRecord[] = []): string {
+    const budget = job.budget || "N/A";
+    const timeline = job.timeline || "N/A";
+    const skills = this.formatPrivateSkillTags(job.skills);
+    const openChats = applications.filter(
+      (application) =>
+        Boolean(application.privateChannelId) &&
+        (application.status === "connected" || application.status === "hired")
+    ).length;
+    const pendingReview = applications.filter((application) => application.status === "submitted").length;
+    const activeHire = applications.find((application) => application.status === "hired");
+    const activeHireLabel = activeHire
+      ? `${this.formatApplicationSequence(job, activeHire)} with <@${activeHire.devUserId}>`
+      : "None";
+    const overview = job.summary.trim();
+
+    return [
+      `# ${job.id} | ${job.title}`,
+      "",
+      `**Network:** ${this.getTierBadge(job.marketTier)} | **Status:** ${this.getPrivateJobStatusBadge(job.status)}`,
+      `**Budget:** ${budget} | **Timeline:** ${timeline}`,
+      `**Applications:** ${applications.length} | **Pending Review:** ${pendingReview} | **Open Chats:** ${openChats}`,
+      `**Active Hire:** ${activeHireLabel}`,
+      `**Skills:** ${skills}`,
+      "",
+      "## Overview",
+      overview || "No overview added.",
+      "",
+      "## Action"
     ].join("\n");
   }
 
@@ -985,6 +1132,29 @@ export class JobService {
     }
 
     return skills.map((skill) => `\`${skill}\``).join(" ");
+  }
+
+  private formatPrivateSkillTags(skills: string[]): string {
+    if (skills.length === 0) {
+      return "No skills added";
+    }
+
+    return skills.map((skill) => `\`${skill}\``).join(" ");
+  }
+
+  private getPrivateJobStatusBadge(status: JobRecord["status"]): string {
+    switch (status) {
+      case "published":
+        return "\u{1F7E2} Open";
+      case "in_progress":
+        return "\u{1F7E0} In Progress";
+      case "closed":
+        return "\u{1F534} Closed";
+      case "paused":
+        return "\u{23F8}\u{FE0F} Paused";
+      case "draft":
+        return "\u{26AA} Draft";
+    }
   }
 
   private getTierBadge(tier: Tier): string {

@@ -37,8 +37,8 @@ export class TranscriptService {
     job: JobRecord,
     application: ApplicationRecord,
     outcome: "completed" | "stopped",
-    score: number,
-    feedbackMessage: string
+    score?: number,
+    feedbackMessage?: string
   ): Promise<TranscriptArtifact> {
     if (!application.privateChannelId) {
       throw new Error("This contract room is not available for transcript export.");
@@ -53,8 +53,8 @@ export class TranscriptService {
         `Job: ${job.id} - ${job.title}`,
         `Application: ${application.id}`,
         `Outcome: ${outcome}`,
-        `Feedback Score: ${score}/5`,
-        `Feedback Message: ${feedbackMessage || "(empty)"}`
+        `Feedback Score: ${typeof score === "number" ? `${score}/5` : "Pending final feedback"}`,
+        `Feedback Message: ${feedbackMessage ? feedbackMessage : "Pending final feedback"}`
       ],
       [
         {
@@ -75,8 +75,8 @@ export class TranscriptService {
     job: JobRecord,
     applications: ApplicationRecord[],
     completedApplication: ApplicationRecord,
-    score: number,
-    feedbackMessage: string
+    score?: number,
+    feedbackMessage?: string
   ): Promise<TranscriptArtifact> {
     const sections: TranscriptSection[] = [];
 
@@ -117,8 +117,8 @@ export class TranscriptService {
         `Job: ${job.id} - ${job.title}`,
         `Final Outcome: completed`,
         `Completed Application: ${completedApplication.id}`,
-        `Feedback Score: ${score}/5`,
-        `Feedback Message: ${feedbackMessage || "(empty)"}`
+        `Feedback Score: ${typeof score === "number" ? `${score}/5` : "Pending final feedback"}`,
+        `Feedback Message: ${feedbackMessage ? feedbackMessage : "Pending final feedback"}`
       ],
       sections
     );

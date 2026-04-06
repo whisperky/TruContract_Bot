@@ -121,8 +121,7 @@ function normalizeJobs(data: Partial<StoreSchema>["jobs"]): JobRecord[] {
   return data.map((job) => {
     const visibilityTiers = Array.isArray(job?.visibilityTiers) ? job.visibilityTiers.filter(isTier) : [];
     const marketTier = isTier(job?.marketTier) ? job.marketTier : highestTier(visibilityTiers) ?? "copper";
-
-    return {
+    const normalized: JobRecord = {
       id: job?.id ?? "",
       clientId: job?.clientId ?? "",
       marketTier,
@@ -139,6 +138,15 @@ function normalizeJobs(data: Partial<StoreSchema>["jobs"]): JobRecord[] {
       createdAt: job?.createdAt ?? "",
       updatedAt: job?.updatedAt ?? job?.createdAt ?? ""
     };
+
+    if (typeof job?.privateMessageId === "string" && job.privateMessageId.length > 0) {
+      normalized.privateMessageId = job.privateMessageId;
+    }
+    if (typeof job?.privateControlsMessageId === "string" && job.privateControlsMessageId.length > 0) {
+      normalized.privateControlsMessageId = job.privateControlsMessageId;
+    }
+
+    return normalized;
   });
 }
 

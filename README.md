@@ -34,23 +34,25 @@ Because of that, clients should never post their jobs directly in public forums.
    - Read Message History
    - Manage Threads
    - Use Slash Commands
-3. Copy `.env.example` to `.env` and fill the IDs.
+3. In the Discord Developer Portal, enable the privileged `Message Content Intent`.
+   This is required for transcript exports to include normal user chat text.
+4. Copy `.env.example` to `.env` and fill the IDs.
    Use neutral network roles such as `Gold Network`, `Silver Network`, and `Copper Network`.
    Do not use visible `client` / `developer` Discord roles for marketplace identity.
-4. Install dependencies:
+5. Install dependencies:
 
 ```bash
 npm install
 ```
 
-5. Run the bot in development:
+6. Run the bot in development:
 
 ```bash
 npm run dev
 ```
 
-6. Use `/deploy-panels` once the bot is online.
-7. Use `/access-set` to grant hidden marketplace access:
+7. Use `/deploy-panels` once the bot is online.
+8. Use `/access-set` to grant hidden marketplace access:
    - `client`
    - `developer`
    - `both`

@@ -63,6 +63,8 @@ export interface JobRecord {
   visibilityTiers: Tier[];
   status: JobStatus;
   privateChannelId: string;
+  privateMessageId?: string;
+  privateControlsMessageId?: string;
   publishedPostIds: Partial<Record<Tier, string>>;
   applicationIds: string[];
   createdAt: string;

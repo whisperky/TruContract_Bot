@@ -1,10 +1,10 @@
 import {
   ActionRowBuilder,
-  type AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   Client,
   Events,
+  GatewayIntentBits,
   type Guild,
   ModalBuilder,
   PermissionFlagsBits,
@@ -42,7 +42,7 @@ export class TrustContractBot {
     store: JsonStore
   ) {
     this.client = new Client({
-      intents: ["Guilds"]
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
     });
 
     this.tickets = new TicketService(this.client, store, appConfig);
@@ -55,6 +55,16 @@ export class TrustContractBot {
   start(): void {
     this.client.once(Events.ClientReady, (readyClient) => {
       logger.info(`Logged in as ${readyClient.user.tag}`);
+
+      const hasMessageContentAccess =
+        readyClient.application.flags.has("GatewayMessageContent") ||
+        readyClient.application.flags.has("GatewayMessageContentLimited");
+
+      if (!hasMessageContentAccess) {
+        logger.warn(
+          "Transcript exports will miss normal user chat text until Message Content intent is enabled in the Discord Developer Portal."
+        );
+      }
     });
 
     this.client.on(Events.InteractionCreate, async (interaction) => {
@@ -330,7 +340,38 @@ export class TrustContractBot {
 
       await interaction.deferReply({ ephemeral: true });
       const threadId = await this.jobs.publishJob(entityId);
+      await this.syncJobRoom(entityId);
       await interaction.editReply(`Published ${entityId} to ${job.marketTier}: <#${threadId}>`);
+      return;
+    }
+
+    if (scope === "job" && action === "edit" && entityId) {
+      const job = await this.jobs.getJob(entityId);
+      if (!job) {
+        await interaction.reply({
+          content: `Job ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (!isStaff(member, this.appConfig) && interaction.user.id !== job.clientId) {
+        await interaction.reply({
+          content: "Only the client who owns the job or staff can edit it.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (job.status === "closed") {
+        await interaction.reply({
+          content: "This job is already closed.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.showModal(buildEditJobModal(job));
       return;
     }
 
@@ -339,6 +380,14 @@ export class TrustContractBot {
       if (!job) {
         await interaction.reply({
           content: `Job ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (job.status !== "published") {
+        await interaction.reply({
+          content: "Publish this job first before requesting the shortlist.",
           ephemeral: true
         });
         return;
@@ -365,6 +414,14 @@ export class TrustContractBot {
       if (!job) {
         await interaction.reply({
           content: `Job ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (job.status !== "published") {
+        await interaction.reply({
+          content: "Publish this job first before requesting developer suggestions.",
           ephemeral: true
         });
         return;
@@ -608,11 +665,7 @@ export class TrustContractBot {
       }
 
       await interaction.deferReply({ ephemeral: true });
-      const title = interaction.fields.getTextInputValue("job_title").trim();
-      const summary = interaction.fields.getTextInputValue("job_summary").trim();
-      const skills = (interaction.fields.getTextInputValue("job_skills") ?? "").trim();
-      const budget = (interaction.fields.getTextInputValue("job_budget") ?? "").trim();
-      const timeline = (interaction.fields.getTextInputValue("job_timeline") ?? "").trim();
+      const payload = readJobFields(interaction);
 
       const ticket = await this.tickets.createPrivateTicket(
         guild,
@@ -621,24 +674,53 @@ export class TrustContractBot {
         this.appConfig.categoryIds.clientPrivate
       );
 
-      const job = await this.jobs.createJob(interaction.user.id, ticket.channelId, marketTier, {
-        title,
-        summary,
-        skills: skills
-          .split(",")
-          .map((value) => value.trim())
-          .filter(Boolean),
-        budget,
-        timeline
-      });
+      const job = await this.jobs.createJob(interaction.user.id, ticket.channelId, marketTier, payload);
 
       const room = await this.tickets.fetchTextChannel(ticket.channelId);
-      await room.send({
-        content: this.jobs.renderPrivateJobSummary(job),
-        components: this.jobs.buildJobManagementButtons(job)
-      });
+      await this.syncJobRoom(job.id);
 
       await interaction.editReply(`Private job room created: ${room}`);
+      return;
+    }
+
+    if (scope === "modal" && action === "edit_job" && entityId) {
+      const job = await this.jobs.getJob(entityId);
+      if (!job) {
+        await interaction.reply({
+          content: `Job ${entityId} was not found.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const member = await guild.members.fetch(interaction.user.id);
+      if (!isStaff(member, this.appConfig) && interaction.user.id !== job.clientId) {
+        await interaction.reply({
+          content: "Only the client who owns the job or staff can edit it.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (job.status === "closed") {
+        await interaction.reply({
+          content: "This job is already closed.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+      const payload = readJobFields(interaction);
+      const updatedJob = await this.jobs.updateJob(entityId, payload);
+      await this.syncJobRoom(updatedJob.id);
+      await this.syncJobApplicationMessages(updatedJob.id);
+      await this.jobs.refreshPublishedJobPosts(updatedJob.id);
+
+      const hasPublishedPost = Object.values(updatedJob.publishedPostIds).some(Boolean);
+      await interaction.editReply(
+        hasPublishedPost ? `Updated ${updatedJob.id}. Public job post refreshed.` : `Updated ${updatedJob.id}.`
+      );
       return;
     }
 
@@ -807,24 +889,10 @@ export class TrustContractBot {
       const outcome = action === "feedback_completed" ? "completed" : "stopped";
 
       await interaction.deferReply({ ephemeral: true });
-      const transcript = await this.finalizeApplicationWithFeedback(
-        guild,
-        application,
-        job,
-        outcome,
-        score,
-        feedbackMessage,
-        extra === "export"
+      await this.finalizeApplicationWithFeedback(guild, application, job, outcome, score, feedbackMessage);
+      await interaction.editReply(
+        `${outcome === "completed" ? "Completed" : "Stopped"} ${application.id} and saved feedback ${this.formatScoreStars(score)}.`
       );
-      await interaction.editReply({
-        content: [
-          `${outcome === "completed" ? "Completed" : "Stopped"} ${application.id} and saved feedback ${this.formatScoreStars(score)}.`,
-          transcript ? `Transcript attached: ${transcript.filename}` : undefined
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        files: transcript ? [transcript.attachment] : []
-      });
       return;
     }
 
@@ -947,6 +1015,46 @@ export class TrustContractBot {
         return;
       }
 
+      case "controls": {
+        if (!["connected", "hired"].includes(application.status)) {
+          await interaction.reply({
+            content: "There are no active controls for this room anymore.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (!canManageJob) {
+          await interaction.reply({
+            content:
+              application.status === "connected"
+                ? "These controls are only available to the client and staff. You can still use Leave Conversation from this room."
+                : "These controls are only available to the client and staff.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const controlButtons = this.jobs.buildApplicationControlPanelButtons(application, job.status);
+        if (controlButtons.length === 0) {
+          await interaction.reply({
+            content: "There are no active controls for this room anymore.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        await interaction.reply({
+          content:
+            application.status === "connected"
+              ? `Client controls for ${application.id}.`
+              : `Contract controls for ${application.id}.`,
+          components: controlButtons,
+          ephemeral: true
+        });
+        return;
+      }
+
       case "hire": {
         if (!canManageJob) {
           await interaction.reply({
@@ -975,6 +1083,7 @@ export class TrustContractBot {
         await interaction.deferReply({ ephemeral: true });
         const result = await this.jobs.hireApplication(application.id);
         await this.jobs.refreshPublishedJobPosts(result.job.id);
+        await this.syncJobRoom(result.job.id);
         await this.syncJobApplicationMessages(result.job.id);
         await interaction.editReply(`Marked ${application.id} as hired.`);
         return;
@@ -999,6 +1108,15 @@ export class TrustContractBot {
 
         await interaction.deferReply({ ephemeral: true });
         await this.jobs.closeApplicationConversation(application.id);
+        const closedBy =
+          interaction.user.id === application.devUserId
+            ? "dev"
+            : interaction.user.id === job.clientId
+              ? null
+              : "staff";
+        if (closedBy) {
+          await this.notifyJobRoomAboutApplicationClosure(job, application, closedBy);
+        }
         await this.cleanupApplicationConversationRoom(application.id);
         await this.syncApplicationMessages(application.id);
         await interaction.editReply(`Closed conversation for ${application.id}.`);
@@ -1068,7 +1186,7 @@ export class TrustContractBot {
     interaction: ButtonInteraction,
     outcome: string,
     applicationId: string,
-    exportChoice: string | undefined
+    choice: string | undefined
   ): Promise<void> {
     const normalizedOutcome = outcome === "completed" ? "completed" : outcome === "stopped" ? "stopped" : null;
     if (!normalizedOutcome) {
@@ -1113,9 +1231,41 @@ export class TrustContractBot {
       return;
     }
 
-    await interaction.showModal(
-      buildApplicationFeedbackModal(application.id, normalizedOutcome, exportChoice === "export")
-    );
+    if (choice === "continue") {
+      await interaction.showModal(buildApplicationFeedbackModal(application.id, normalizedOutcome));
+      return;
+    }
+
+    if (choice !== "export") {
+      await interaction.reply({
+        content: "Unknown transcript choice.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    try {
+      const transcript =
+        normalizedOutcome === "completed"
+          ? await this.transcripts.exportJobClosureArchive(
+              interaction.guild!,
+              job,
+              await this.jobs.listApplicationsByJob(job.id),
+              application
+            )
+          : await this.transcripts.exportApplicationTranscript(interaction.guild!, job, application, normalizedOutcome);
+
+      await interaction.reply({
+        content: `Transcript attached: ${transcript.filename}`,
+        files: [transcript.attachment],
+        ephemeral: true
+      });
+    } catch (error) {
+      await interaction.reply({
+        content: error instanceof Error ? error.message : "Transcript export failed.",
+        ephemeral: true
+      });
+    }
   }
 
   private async syncApplicationMessages(applicationId: string): Promise<void> {
@@ -1157,6 +1307,37 @@ export class TrustContractBot {
     });
     if (privateMessageId !== application.privateMessageId) {
       await this.jobs.setApplicationPrivateMessageId(application.id, privateMessageId);
+    }
+  }
+
+  private async syncJobRoom(jobId: string): Promise<void> {
+    const job = await this.jobs.getJob(jobId);
+    if (!job || !job.privateChannelId) {
+      return;
+    }
+
+    const applications = await this.jobs.listApplicationsByJob(jobId);
+
+    const room = await this.tickets.fetchTextChannelOrNull(job.privateChannelId);
+    if (!room) {
+      return;
+    }
+
+    if (job.privateControlsMessageId) {
+      const controlsMessage = await room.messages.fetch(job.privateControlsMessageId).catch(() => null);
+      if (controlsMessage) {
+        await controlsMessage.delete().catch(() => undefined);
+      }
+      await this.jobs.clearJobPrivateControlsMessageId(job.id);
+    }
+
+    const privateMessageId = await this.upsertChannelMessage(room, job.privateMessageId, {
+      content: this.jobs.renderSmartPrivateJobSummary(job, applications),
+      components: this.jobs.buildJobManagementButtons(job)
+    });
+
+    if (privateMessageId !== job.privateMessageId) {
+      await this.jobs.setJobPrivateMessageId(job.id, privateMessageId);
     }
   }
 
@@ -1205,18 +1386,8 @@ export class TrustContractBot {
     job: JobRecord,
     outcome: "completed" | "stopped",
     score: number,
-    feedbackMessage: string,
-    shouldExportTranscript: boolean
-  ): Promise<{ attachment: AttachmentBuilder; filename: string } | null> {
-    const applications =
-      shouldExportTranscript && outcome === "completed" ? await this.jobs.listApplicationsByJob(job.id) : [];
-    const transcript =
-      shouldExportTranscript
-        ? outcome === "completed"
-          ? await this.transcripts.exportJobClosureArchive(guild, job, applications, application, score, feedbackMessage)
-          : await this.transcripts.exportApplicationTranscript(guild, job, application, outcome, score, feedbackMessage)
-        : null;
-
+    feedbackMessage: string
+  ): Promise<void> {
     const devMember = await guild.members.fetch(application.devUserId).catch(() => null);
     if (!devMember) {
       throw new Error(`Developer ${application.devUserId} could not be found for feedback.`);
@@ -1243,16 +1414,10 @@ export class TrustContractBot {
     if (outcome === "completed") {
       await this.cleanupJobConversationRooms(job.id);
     } else {
+      await this.syncJobRoom(job.id);
       await this.cleanupApplicationConversationRoom(application.id);
       await this.syncJobApplicationMessages(job.id);
     }
-
-    return transcript
-      ? {
-          attachment: transcript.attachment,
-          filename: transcript.filename
-        }
-      : null;
   }
 
   private async cleanupApplicationConversationRoom(applicationId: string): Promise<void> {
@@ -1287,6 +1452,31 @@ export class TrustContractBot {
     }
 
     await this.tickets.closeAndDeleteTextChannels(channelIds);
+  }
+
+  private async notifyJobRoomAboutApplicationClosure(
+    job: JobRecord,
+    application: ApplicationRecord,
+    closedBy: "dev" | "staff"
+  ): Promise<void> {
+    if (!job.privateChannelId) {
+      return;
+    }
+
+    const room = await this.tickets.fetchTextChannelOrNull(job.privateChannelId);
+    if (!room) {
+      return;
+    }
+
+    const sequence = this.formatApplicationSequence(job, application);
+    await room
+      .send(`Application ${sequence} chat room is closed by ${closedBy}.`)
+      .catch(() => undefined);
+  }
+
+  private formatApplicationSequence(job: JobRecord, application: ApplicationRecord): string {
+    const index = job.applicationIds.indexOf(application.id);
+    return index === -1 ? application.id : `#${index + 1}`;
   }
 
   private formatScoreStars(score: number): string {
@@ -1359,51 +1549,115 @@ export class TrustContractBot {
 }
 
 function buildNewJobModal(tier: Tier): ModalBuilder {
+  return buildJobModal(`modal|new_job|${tier}`, `Create ${tier.charAt(0).toUpperCase()}${tier.slice(1)} Job`);
+}
+
+function buildEditJobModal(job: JobRecord): ModalBuilder {
+  return buildJobModal(`modal|edit_job|${job.id}`, `Edit ${job.id}`, {
+    title: job.title,
+    summary: job.summary,
+    skills: job.skills.join(", "),
+    budget: job.budget,
+    timeline: job.timeline
+  });
+}
+
+function buildJobModal(
+  customId: string,
+  title: string,
+  initialValues?: {
+    title?: string;
+    summary?: string;
+    skills?: string;
+    budget?: string;
+    timeline?: string;
+  }
+): ModalBuilder {
+  const titleInput = new TextInputBuilder()
+    .setCustomId("job_title")
+    .setLabel("Job Title")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(100);
+  if (initialValues?.title) {
+    titleInput.setValue(initialValues.title);
+  }
+
+  const summaryInput = new TextInputBuilder()
+    .setCustomId("job_summary")
+    .setLabel("Overview")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(4000);
+  if (initialValues?.summary) {
+    summaryInput.setValue(initialValues.summary);
+  }
+
+  const skillsInput = new TextInputBuilder()
+    .setCustomId("job_skills")
+    .setLabel("Skills (comma separated)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(200);
+  if (initialValues?.skills) {
+    skillsInput.setValue(initialValues.skills);
+  }
+
+  const budgetInput = new TextInputBuilder()
+    .setCustomId("job_budget")
+    .setLabel("Budget")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(100);
+  if (initialValues?.budget) {
+    budgetInput.setValue(initialValues.budget);
+  }
+
+  const timelineInput = new TextInputBuilder()
+    .setCustomId("job_timeline")
+    .setLabel("Timeline")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(100);
+  if (initialValues?.timeline) {
+    timelineInput.setValue(initialValues.timeline);
+  }
+
   return new ModalBuilder()
-    .setCustomId(`modal|new_job|${tier}`)
-    .setTitle(`Create ${tier.charAt(0).toUpperCase()}${tier.slice(1)} Job`)
+    .setCustomId(customId)
+    .setTitle(title)
     .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("job_title")
-          .setLabel("Job Title")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(100)
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("job_summary")
-          .setLabel("Overview")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(true)
-          .setMaxLength(4000)
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("job_skills")
-          .setLabel("Skills (comma separated)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setMaxLength(200)
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("job_budget")
-          .setLabel("Budget")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setMaxLength(100)
-      ),
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId("job_timeline")
-          .setLabel("Timeline")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setMaxLength(100)
-      )
+      new ActionRowBuilder<TextInputBuilder>().addComponents(titleInput),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(summaryInput),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(skillsInput),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(budgetInput),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(timelineInput)
     );
+}
+
+function readJobFields(interaction: ModalSubmitInteraction): {
+  title: string;
+  summary: string;
+  skills: string[];
+  budget: string;
+  timeline: string;
+} {
+  const title = interaction.fields.getTextInputValue("job_title").trim();
+  const summary = interaction.fields.getTextInputValue("job_summary").trim();
+  const skills = (interaction.fields.getTextInputValue("job_skills") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const budget = (interaction.fields.getTextInputValue("job_budget") ?? "").trim();
+  const timeline = (interaction.fields.getTextInputValue("job_timeline") ?? "").trim();
+
+  return {
+    title,
+    summary,
+    skills,
+    budget,
+    timeline
+  };
 }
 
 function buildDeveloperProfileModal(): ModalBuilder {
@@ -1524,14 +1778,13 @@ function buildApplicationModal(jobId: string): ModalBuilder {
 
 function buildApplicationFeedbackModal(
   applicationId: string,
-  outcome: "completed" | "stopped",
-  exportTranscript: boolean
+  outcome: "completed" | "stopped"
 ): ModalBuilder {
   const title = outcome === "completed" ? "Complete Contract" : "Stop Contract";
   const messageLabel = outcome === "completed" ? "Feedback (optional)" : "Why it stopped? (optional)";
 
   return new ModalBuilder()
-    .setCustomId(`modal|feedback_${outcome}|${applicationId}|${exportTranscript ? "export" : "skip"}`)
+    .setCustomId(`modal|feedback_${outcome}|${applicationId}`)
     .setTitle(title)
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -1562,7 +1815,7 @@ function buildFinalizeTranscriptChoiceComponents(
   return [
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(`application_finalize|${outcome}|${applicationId}|skip`)
+        .setCustomId(`application_finalize|${outcome}|${applicationId}|continue`)
         .setLabel("Continue")
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
