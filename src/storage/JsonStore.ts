@@ -109,6 +109,18 @@ function normalizeProfiles(data: Partial<StoreSchema>["profiles"]): ProfileRecor
       normalized.privateChannelId = profile.privateChannelId;
     }
 
+    if (profile?.resumeFileName) {
+      normalized.resumeFileName = profile.resumeFileName;
+    }
+
+    if (profile?.resumeFileUrl) {
+      normalized.resumeFileUrl = profile.resumeFileUrl;
+    }
+
+    if (profile?.resumeUploadedAt) {
+      normalized.resumeUploadedAt = profile.resumeUploadedAt;
+    }
+
     return normalized;
   });
 }

@@ -33,6 +33,9 @@ export interface ProfileRecord {
   previousProjects: string;
   skills: string[];
   portfolioLinks: string[];
+  resumeFileName?: string;
+  resumeFileUrl?: string;
+  resumeUploadedAt?: string;
   availability: string;
   trustScore: number;
   moderatorStars: number;

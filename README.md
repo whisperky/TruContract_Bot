@@ -34,8 +34,9 @@ Because of that, clients should never post their jobs directly in public forums.
    - Read Message History
    - Manage Threads
    - Use Slash Commands
-3. In the Discord Developer Portal, enable the privileged `Message Content Intent`.
-   This is required for transcript exports to include normal user chat text.
+3. In the Discord Developer Portal, enable privileged intents:
+   - `Message Content Intent` for transcript exports
+   - `Server Members Intent` for accurate tier member count channels
 4. Copy `.env.example` to `.env` and fill the IDs.
    Use neutral network roles such as `Gold Network`, `Silver Network`, and `Copper Network`.
    Do not use visible `client` / `developer` Discord roles for marketplace identity.
@@ -57,6 +58,15 @@ npm run dev
    - `developer`
    - `both`
    - `revoke`
+9. Optional tier counter channels in the channel list:
+   - Create one locked voice channel in each network category
+   - Set `NETWORK_GOLD_COUNT_CHANNEL_ID`, `NETWORK_SILVER_COUNT_CHANNEL_ID`, `NETWORK_COPPER_COUNT_CHANNEL_ID`
+   - The bot auto-renames them to `Members: N`
+   - Use `/tier-counts-sync` to force a manual refresh
+10. Developer resume upload:
+   - Create/update developer profile from the desk panel
+   - Use `/profile-resume` with an attachment to upload or replace your resume
+   - The published profile thread will show the latest resume link
 
 ## Notes
 
@@ -68,3 +78,4 @@ npm run dev
 - Higher-tier users can use lower-tier desks, but each desk only manages that exact market.
 - This version does not require deal-room categories yet.
 - Neutral network roles are still used for coarse Discord channel access where needed, but marketplace identity is now stored in the bot.
+- Tier counter channel updates are debounced with `NETWORK_TIER_COUNT_UPDATE_DEBOUNCE_MS` (default `15000` ms).

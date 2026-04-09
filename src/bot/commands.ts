@@ -85,6 +85,19 @@ export const slashCommands = [
         .setMinValue(0)
         .setMaxValue(100)
         .setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName("tier-counts-sync")
+    .setDescription("Refresh network tier member count channels.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+  new SlashCommandBuilder()
+    .setName("profile-resume")
+    .setDescription("Upload or replace your developer resume file.")
+    .addAttachmentOption((option) =>
+      option
+        .setName("file")
+        .setDescription("Resume file (PDF preferred)")
+        .setRequired(true)
     )
 ].map((command) => command.toJSON());
 

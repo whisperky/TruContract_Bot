@@ -36,13 +36,21 @@ export class TrustContractBot {
   private readonly profiles: ProfileService;
   private readonly jobs: JobService;
   private readonly transcripts: TranscriptService;
+  private tierCountSyncTimer: NodeJS.Timeout | null = null;
+  private tierCountSyncInFlight = false;
+  private pendingTierCountGuildId: string | null = null;
 
   constructor(
     private readonly appConfig: AppConfig,
     store: JsonStore
   ) {
     this.client = new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+      ]
     });
 
     this.tickets = new TicketService(this.client, store, appConfig);
@@ -53,7 +61,7 @@ export class TrustContractBot {
   }
 
   start(): void {
-    this.client.once(Events.ClientReady, (readyClient) => {
+    this.client.once(Events.ClientReady, async (readyClient) => {
       logger.info(`Logged in as ${readyClient.user.tag}`);
 
       const hasMessageContentAccess =
@@ -65,6 +73,47 @@ export class TrustContractBot {
           "Transcript exports will miss normal user chat text until Message Content intent is enabled in the Discord Developer Portal."
         );
       }
+
+      if (this.hasTierMemberCountChannelsConfigured()) {
+        const hasGuildMembersAccess =
+          readyClient.application.flags.has("GatewayGuildMembers") ||
+          readyClient.application.flags.has("GatewayGuildMembersLimited");
+        if (!hasGuildMembersAccess) {
+          logger.warn(
+            "Tier member count channels may be inaccurate until Guild Members intent is enabled in the Discord Developer Portal."
+          );
+        }
+
+        this.scheduleTierMemberCountSync(this.appConfig.guildId, 0);
+      }
+    });
+
+    this.client.on(Events.GuildMemberAdd, (member) => {
+      if (member.guild.id !== this.appConfig.guildId) {
+        return;
+      }
+
+      this.scheduleTierMemberCountSync(member.guild.id);
+    });
+
+    this.client.on(Events.GuildMemberRemove, (member) => {
+      if (member.guild.id !== this.appConfig.guildId) {
+        return;
+      }
+
+      this.scheduleTierMemberCountSync(member.guild.id);
+    });
+
+    this.client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+      if (newMember.guild.id !== this.appConfig.guildId) {
+        return;
+      }
+
+      if (!this.hasTierRoleMembershipChange(oldMember, newMember)) {
+        return;
+      }
+
+      this.scheduleTierMemberCountSync(newMember.guild.id);
     });
 
     this.client.on(Events.InteractionCreate, async (interaction) => {
@@ -173,6 +222,7 @@ export class TrustContractBot {
         }
 
         const record = await this.access.setAccess(guildMember, accessPayload);
+        this.scheduleTierMemberCountSync(guild.id);
 
         if (!record) {
           await interaction.editReply(`Revoked marketplace access for ${user}.`);
@@ -207,7 +257,60 @@ export class TrustContractBot {
           tier,
           updatedBy: interaction.user.id
         });
+        this.scheduleTierMemberCountSync(guild.id);
         await interaction.editReply(`Approved ${user} as ${tier}. Profile ${profile.id} published.`);
+        return;
+      }
+
+      case "tier-counts-sync": {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+          await interaction.reply({
+            content: "You do not have permission to sync tier counts.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (!this.hasTierMemberCountChannelsConfigured()) {
+          await interaction.reply({
+            content: "Tier member counter channels are not configured.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+        await this.syncTierMemberCountChannels(guild.id);
+        await interaction.editReply("Tier member count channels refreshed.");
+        return;
+      }
+
+      case "profile-resume": {
+        if (!(await this.access.hasKind(interaction.user.id, "developer"))) {
+          await interaction.reply({
+            content: "Developer access has not been granted for your account yet.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const attachment = interaction.options.getAttachment("file", true);
+        await interaction.deferReply({ ephemeral: true });
+        const member = await guild.members.fetch(interaction.user.id);
+        let profile: ProfileRecord;
+        try {
+          profile = await this.profiles.uploadResume(member, attachment);
+        } catch (error) {
+          await interaction.editReply(error instanceof Error ? error.message : "Resume upload failed.");
+          return;
+        }
+        const threadId = this.getPublishedProfileThreadId(profile);
+
+        await interaction.editReply(
+          threadId
+            ? `Resume uploaded and synced to your profile thread: <#${threadId}>`
+            : "Resume uploaded, but no published profile thread was found yet."
+        );
         return;
       }
 
@@ -758,8 +861,8 @@ export class TrustContractBot {
       const threadId = this.getPublishedProfileThreadId(profile);
       await interaction.editReply(
         threadId
-          ? `Profile synced to your network forum: <#${threadId}>`
-          : `Profile ${profile.id} was saved, but no public profile thread was found.`
+          ? `Profile synced to your network forum: <#${threadId}>. Optional: upload your resume with /profile-resume.`
+          : `Profile ${profile.id} was saved, but no public profile thread was found. Optional: upload your resume with /profile-resume.`
       );
       return;
     }
@@ -1506,6 +1609,121 @@ export class TrustContractBot {
         return value;
       default:
         return null;
+    }
+  }
+
+  private hasTierMemberCountChannelsConfigured(): boolean {
+    return this.getConfiguredTierCountChannels().length > 0;
+  }
+
+  private getConfiguredTierCountChannels(): Array<{ tier: Tier; channelId: string }> {
+    const ids = this.appConfig.channelIds.networkTierCount;
+    const entries: Array<{ tier: Tier; channelId: string }> = [];
+    const tiers: Tier[] = ["gold", "silver", "copper"];
+
+    for (const tier of tiers) {
+      const channelId = ids[tier];
+      if (!channelId) {
+        continue;
+      }
+
+      entries.push({ tier, channelId });
+    }
+
+    return entries;
+  }
+
+  private hasTierRoleMembershipChange(
+    oldMember: Pick<GuildMember, "roles">,
+    newMember: Pick<GuildMember, "roles">
+  ): boolean {
+    const tierRoleIds = Object.values(this.appConfig.roleIds.network);
+    return tierRoleIds.some((roleId) => oldMember.roles.cache.has(roleId) !== newMember.roles.cache.has(roleId));
+  }
+
+  private scheduleTierMemberCountSync(
+    guildId: string,
+    delayMs = this.appConfig.networkTierCountUpdateDebounceMs
+  ): void {
+    if (!this.hasTierMemberCountChannelsConfigured()) {
+      return;
+    }
+
+    this.pendingTierCountGuildId = guildId;
+    if (this.tierCountSyncTimer) {
+      clearTimeout(this.tierCountSyncTimer);
+    }
+
+    this.tierCountSyncTimer = setTimeout(() => {
+      this.tierCountSyncTimer = null;
+      void this.flushScheduledTierMemberCountSync();
+    }, delayMs);
+  }
+
+  private async flushScheduledTierMemberCountSync(): Promise<void> {
+    if (this.tierCountSyncInFlight) {
+      if (this.pendingTierCountGuildId) {
+        this.scheduleTierMemberCountSync(this.pendingTierCountGuildId);
+      }
+      return;
+    }
+
+    const guildId = this.pendingTierCountGuildId;
+    if (!guildId) {
+      return;
+    }
+
+    this.pendingTierCountGuildId = null;
+    this.tierCountSyncInFlight = true;
+    try {
+      await this.syncTierMemberCountChannels(guildId);
+    } catch (error) {
+      logger.error("Scheduled tier member count sync failed", {
+        error: error instanceof Error ? error.message : String(error),
+        guildId
+      });
+    } finally {
+      this.tierCountSyncInFlight = false;
+      if (this.pendingTierCountGuildId && !this.tierCountSyncTimer) {
+        this.scheduleTierMemberCountSync(this.pendingTierCountGuildId);
+      }
+    }
+  }
+
+  private async syncTierMemberCountChannels(guildId: string): Promise<void> {
+    const configured = this.getConfiguredTierCountChannels();
+    if (configured.length === 0) {
+      return;
+    }
+
+    const guild = this.client.guilds.cache.get(guildId) ?? (await this.client.guilds.fetch(guildId).catch(() => null));
+    if (!guild) {
+      throw new Error(`Guild ${guildId} could not be fetched for tier member count sync.`);
+    }
+
+    await guild.members.fetch();
+
+    for (const { tier, channelId } of configured) {
+      const tierRoleId = this.appConfig.roleIds.network[tier];
+      const memberCount = guild.members.cache.filter((member) => member.roles.cache.has(tierRoleId)).size;
+      const channel = await guild.channels.fetch(channelId).catch(() => null);
+      if (!channel) {
+        logger.warn(`Skipping tier count sync because channel ${channelId} was not found.`, { tier });
+        continue;
+      }
+
+      const nextName = `Members: ${memberCount.toLocaleString("en-US")}`;
+      if (channel.name === nextName) {
+        continue;
+      }
+
+      await channel.setName(nextName, "Sync network tier member count").catch((error) => {
+        logger.error("Tier member count channel rename failed", {
+          tier,
+          channelId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
     }
   }
 

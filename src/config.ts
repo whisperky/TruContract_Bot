@@ -27,6 +27,10 @@ const envSchema = z.object({
   NETWORK_GOLD_ROLE_ID: z.string().min(1),
   NETWORK_SILVER_ROLE_ID: z.string().min(1),
   NETWORK_COPPER_ROLE_ID: z.string().min(1),
+  NETWORK_GOLD_COUNT_CHANNEL_ID: z.string().min(1).optional(),
+  NETWORK_SILVER_COUNT_CHANNEL_ID: z.string().min(1).optional(),
+  NETWORK_COPPER_COUNT_CHANNEL_ID: z.string().min(1).optional(),
+  NETWORK_TIER_COUNT_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).default(15_000),
   CLIENT_GOLD_ROLE_ID: z.string().min(1).optional(),
   CLIENT_SILVER_ROLE_ID: z.string().min(1).optional(),
   CLIENT_COPPER_ROLE_ID: z.string().min(1).optional(),
@@ -61,7 +65,12 @@ export const config = {
       silver: raw.DEV_SILVER_DESK_CHANNEL_ID,
       copper: raw.DEV_COPPER_DESK_CHANNEL_ID
     },
-    safetyDesk: raw.SAFETY_DESK_CHANNEL_ID
+    safetyDesk: raw.SAFETY_DESK_CHANNEL_ID,
+    networkTierCount: {
+      gold: raw.NETWORK_GOLD_COUNT_CHANNEL_ID,
+      silver: raw.NETWORK_SILVER_COUNT_CHANNEL_ID,
+      copper: raw.NETWORK_COPPER_COUNT_CHANNEL_ID
+    }
   },
   categoryIds: {
     clientPrivate: raw.CLIENT_PRIVATE_CATEGORY_ID,
@@ -99,6 +108,7 @@ export const config = {
       }
     }
   },
+  networkTierCountUpdateDebounceMs: raw.NETWORK_TIER_COUNT_UPDATE_DEBOUNCE_MS,
   storeFile: raw.STORE_FILE
 };
 

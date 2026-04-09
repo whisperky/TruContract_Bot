@@ -6,6 +6,7 @@ import {
   EmbedBuilder,
   ForumChannel,
   ThreadAutoArchiveDuration,
+  type Attachment,
   type Client,
   type GuildMember
 } from "discord.js";
@@ -96,6 +97,28 @@ export class ProfileService {
 
       draft.profiles.push(created);
       return structuredClone(created);
+    });
+
+    return this.syncPublishedProfile(member, profile);
+  }
+
+  async uploadResume(member: GuildMember, attachment: Attachment): Promise<ProfileRecord> {
+    if (!attachment.url) {
+      throw new Error("Resume upload failed because Discord did not provide a file URL.");
+    }
+
+    const now = nowIso();
+    const profile = await this.store.mutate((draft) => {
+      const existing = draft.profiles.find((item) => item.userId === member.id);
+      if (!existing) {
+        throw new Error("Create your developer profile first, then upload your resume.");
+      }
+
+      existing.resumeFileName = attachment.name;
+      existing.resumeFileUrl = attachment.url;
+      existing.resumeUploadedAt = now;
+      existing.updatedAt = now;
+      return structuredClone(existing);
     });
 
     return this.syncPublishedProfile(member, profile);
@@ -214,6 +237,7 @@ export class ProfileService {
         [
           `Manage your presence in the ${getTierLabel(tier)} market.`,
           "Create or update your developer profile.",
+          "Upload or replace your resume with `/profile-resume` (attach your file).",
           "Clients discover published profiles through private ranked suggestions, not forum browsing."
         ].join("\n")
       )
@@ -323,6 +347,10 @@ export class ProfileService {
       profile.portfolioLinks.length > 0
         ? profile.portfolioLinks.map((link) => `- ${link}`).join("\n")
         : "- none";
+    const resume =
+      profile.resumeFileUrl && profile.resumeFileName
+        ? `[${profile.resumeFileName}](${profile.resumeFileUrl})`
+        : profile.resumeFileUrl ?? "Not uploaded";
     const stars = profile.moderatorStars > 0 ? "★".repeat(profile.moderatorStars) : "none";
     const memberSince = this.formatMemberSince(profile.networkRegisteredAt || profile.createdAt);
     const clientRating = this.formatAverageStars(profile.feedbackAverage, profile.feedbackCount);
@@ -341,6 +369,7 @@ export class ProfileService {
       `**Client Rating:** ${clientRating}`,
       `**Member Since:** ${memberSince}`,
       `**Skills:** ${skills}`,
+      `**Resume:** ${resume}`,
       "",
       "## Summary",
       profile.bio,
