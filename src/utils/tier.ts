@@ -32,7 +32,6 @@ export function getTierLabel(tier: Tier): string {
     case "silver":
       return "Silver";
     case "copper":
-      return "Copper";
+      return "Bronze";
   }
 }
-

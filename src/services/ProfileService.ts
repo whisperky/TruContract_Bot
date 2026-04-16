@@ -235,7 +235,7 @@ export class ProfileService {
       .setTitle(`${getTierLabel(tier)} Developer Desk`)
       .setDescription(
         [
-          `Manage your presence in the ${getTierLabel(tier)} market.`,
+          `Manage your presence in the ${getTierLabel(tier)} developer tier.`,
           "Create or update your developer profile.",
           "Upload or replace your resume with `/profile-resume` (attach your file).",
           "Clients discover published profiles through private ranked suggestions, not forum browsing."
@@ -360,7 +360,7 @@ export class ProfileService {
       "",
       `**Talent:** <@${profile.userId}>`,
       `**Title:** ${profile.headline}`,
-      `**Network:** ${this.getTierLabel(tier)}`,
+      `**Developer Tier:** ${this.getTierLabel(tier)}`,
       `**Trust Score:** ${profile.trustScore}`,
       `**Moderator Stars:** ${stars}`,
       `**Completed Contracts:** ${profile.completedContracts}`,
@@ -419,7 +419,7 @@ export class ProfileService {
       case "silver":
         return "Silver";
       case "copper":
-        return "Copper";
+        return "Bronze";
     }
   }
 

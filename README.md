@@ -4,8 +4,8 @@ Privacy-first Discord bot for the `Trust Contract` server.
 
 ## What it does
 
-- Opens private client job rooms from tier-specific desk panels
-- Publishes anonymized public opportunity posts authored by the bot
+- Opens private client job rooms from a single client desk
+- Publishes anonymized public job posts authored by the bot
 - Accepts private developer applications via buttons and modals
 - Generates shortlist summaries inside the client's private room
 - Stores developer profiles and publishes official talent posts to level forums
@@ -38,7 +38,7 @@ Because of that, clients should never post their jobs directly in public forums.
    - `Message Content Intent` for transcript exports
    - `Server Members Intent` for accurate tier member count channels
 4. Copy `.env.example` to `.env` and fill the IDs.
-   Use neutral network roles such as `Gold Network`, `Silver Network`, and `Copper Network`.
+   Use neutral network roles such as `Gold Network`, `Silver Network`, and `Bronze Network`.
    Do not use visible `client` / `developer` Discord roles for marketplace identity.
 5. Install dependencies:
 
@@ -72,10 +72,11 @@ npm run dev
 
 - This project uses a JSON store so you can run it immediately.
 - For production, swap the storage layer to PostgreSQL.
-- The bot is designed so public opportunity posts never reveal the client.
-- Each market tier now has its own client desk and developer desk.
-- A job belongs to one exact market tier, based on the desk where it was created.
-- Higher-tier users can use lower-tier desks, but each desk only manages that exact market.
+- The bot is designed so public job posts never reveal the client.
+- Set `JOBS_FORUM_ID` to publish all jobs into one public jobs forum. If it is omitted, the bot falls back to the older tier-specific opportunity forums.
+- Use one `CLIENT_DESK_CHANNEL_ID` for clients. The client chooses the required developer access tier during the `New Job` flow.
+- Developer access is shown as `Bronze`, `Silver`, and `Gold`. The internal enum still uses `copper` for Bronze compatibility.
+- Higher-tier clients can create jobs for lower developer access tiers.
 - This version does not require deal-room categories yet.
 - Neutral network roles are still used for coarse Discord channel access where needed, but marketplace identity is now stored in the bot.
 - Tier counter channel updates are debounced with `NETWORK_TIER_COUNT_UPDATE_DEBOUNCE_MS` (default `15000` ms).

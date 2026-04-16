@@ -41,7 +41,7 @@ export const slashCommands = [
         .addChoices(
           { name: "Gold", value: "gold" },
           { name: "Silver", value: "silver" },
-          { name: "Copper", value: "copper" }
+          { name: "Bronze", value: "copper" }
         )
     ),
   new SlashCommandBuilder()
@@ -59,7 +59,7 @@ export const slashCommands = [
         .addChoices(
           { name: "Gold", value: "gold" },
           { name: "Silver", value: "silver" },
-          { name: "Copper", value: "copper" }
+          { name: "Bronze", value: "copper" }
         )
     )
     .addIntegerOption((option) =>

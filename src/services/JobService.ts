@@ -325,9 +325,10 @@ export class JobService {
     }
 
     const tier = job.marketTier;
-    const forumChannel = await this.client.channels.fetch(this.appConfig.forums.opportunities[tier]);
+    const targetForumId = this.getPublicJobsForumId(tier);
+    const forumChannel = await this.client.channels.fetch(targetForumId);
     if (!forumChannel || forumChannel.type !== ChannelType.GuildForum) {
-      throw new Error(`Opportunity forum for ${tier} is missing or invalid.`);
+      throw new Error("Configured public jobs forum is missing or invalid.");
     }
 
     const forum = forumChannel as ForumChannel;
@@ -345,7 +346,7 @@ export class JobService {
 
     if (existingThreadId) {
       const thread = await this.client.channels.fetch(existingThreadId).catch(() => null);
-      if (thread?.isThread()) {
+      if (thread?.isThread() && thread.parentId === targetForumId) {
         const starterMessage = await thread.fetchStarterMessage().catch(() => null);
         if (starterMessage) {
           await starterMessage.edit({
@@ -377,6 +378,14 @@ export class JobService {
         }
       });
       threadId = created.id;
+    }
+
+    if (existingThreadId && threadId !== existingThreadId) {
+      const previousThread = await this.client.channels.fetch(existingThreadId).catch(() => null);
+      if (previousThread?.isThread()) {
+        await previousThread.setArchived(true).catch(() => undefined);
+        await previousThread.setLocked(true).catch(() => undefined);
+      }
     }
 
     await this.store.mutate((draft) => {
@@ -614,30 +623,54 @@ export class JobService {
     ];
   }
 
-  buildClientDeskEmbed(tier: Tier): EmbedBuilder {
+  buildClientDeskEmbed(): EmbedBuilder {
     return new EmbedBuilder()
-      .setTitle(`${getTierLabel(tier)} Client Desk`)
+      .setTitle("Client Desk")
       .setDescription(
         [
-          `Create jobs for the ${getTierLabel(tier)} market and publish them into the ${getTierLabel(tier)} opportunities channel.`,
+          "Create private jobs and publish them into the public jobs forum.",
           "Your identity and search history stay private.",
-          "This desk only manages jobs scoped to this network tier."
+          "Choose the required developer access tier when you create a job."
         ].join("\n")
       )
       .setColor(0x00a86b);
   }
 
-  buildClientDeskComponents(tier: Tier): ActionRowBuilder<ButtonBuilder>[] {
+  buildClientDeskComponents(): ActionRowBuilder<ButtonBuilder>[] {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`desk|new_job|${tier}`)
+          .setCustomId("desk|new_job")
           .setLabel("New Job")
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
-          .setCustomId(`desk|my_jobs|${tier}`)
+          .setCustomId("desk|my_jobs")
           .setLabel("My Jobs")
           .setStyle(ButtonStyle.Secondary)
+      )
+    ];
+  }
+
+  buildClientDeskAccessButtons(allowedTiers: Tier[]): ActionRowBuilder<ButtonBuilder>[] {
+    const allowed = new Set(allowedTiers);
+
+    return [
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId("desk|new_job_access|copper")
+          .setLabel("Bronze Access")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(!allowed.has("copper")),
+        new ButtonBuilder()
+          .setCustomId("desk|new_job_access|silver")
+          .setLabel("Silver Access")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(!allowed.has("silver")),
+        new ButtonBuilder()
+          .setCustomId("desk|new_job_access|gold")
+          .setLabel("Gold Access")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!allowed.has("gold"))
       )
     ];
   }
@@ -651,10 +684,10 @@ export class JobService {
     return [
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-        .setCustomId(`job|publish|${job.id}`)
-        .setLabel(`Publish ${getTierLabel(job.marketTier)}`)
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(!canPublish),
+          .setCustomId(`job|publish|${job.id}`)
+          .setLabel(`Publish ${this.getDeveloperAccessLabel(job.marketTier)}`)
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(!canPublish),
         new ButtonBuilder()
           .setCustomId(`job|edit|${job.id}`)
           .setLabel("Edit Job")
@@ -715,7 +748,7 @@ export class JobService {
       `## Application ${this.formatApplicationSequence(job, application)}`,
       `**Status:** ${this.formatApplicationStatus(application.status)}`,
       `**Entry:** ${this.formatApplicationOrigin(application.origin)}`,
-      `**Market:** ${getTierLabel(job.marketTier)}`,
+      `**Developer Access:** ${this.getDeveloperAccessLabel(job.marketTier)}`,
       `**Talent:** <@${application.devUserId}>`,
       ...this.buildProfileSummaryLines(profile),
       ...this.buildApplicationDetailLines(application),
@@ -760,7 +793,7 @@ export class JobService {
       "",
       `**Entry:** ${this.formatApplicationOrigin(application.origin)}`,
       `**Job:** ${job.id} - ${job.title}`,
-      `**Market:** ${getTierLabel(job.marketTier)}`,
+      `**Developer Access:** ${this.getDeveloperAccessLabel(job.marketTier)}`,
       `**Client:** <@${job.clientId}>`,
       `**Talent:** <@${application.devUserId}>`,
       `**Status:** ${this.formatApplicationStatus(application.status)}`,
@@ -865,7 +898,7 @@ export class JobService {
     return [
       `# ${job.id} • ${job.title}`,
       "",
-      `**Market:** ${getTierLabel(job.marketTier)}`,
+      `**Developer Access:** ${this.getDeveloperAccessLabel(job.marketTier)}`,
       `**Status:** ${job.status}`,
       `**Budget:** ${budget}`,
       `**Timeline:** ${timeline}`,
@@ -899,7 +932,7 @@ export class JobService {
     return [
       `# ${job.id} | ${job.title}`,
       "",
-      `**Network:** ${this.getTierBadge(job.marketTier)} | **Status:** ${this.getPrivateJobStatusBadge(job.status)}`,
+      `**Developer Access:** ${this.getDeveloperAccessBadge(job.marketTier)} | **Status:** ${this.getPrivateJobStatusBadge(job.status)}`,
       `**Budget:** ${budget} | **Timeline:** ${timeline}`,
       `**Applications:** ${applications.length} | **Pending Review:** ${pendingReview} | **Open Chats:** ${openChats}`,
       `**Active Hire:** ${activeHireLabel}`,
@@ -924,7 +957,7 @@ export class JobService {
       return [
         `${index + 1}. <@${application.devUserId}>`,
         `   - application: ${application.id}`,
-        `   - market: ${getTierLabel(job.marketTier)}`,
+        `   - developer access: ${this.getDeveloperAccessLabel(job.marketTier)}`,
         `   - score: ${application.score ?? 0}`,
         `   - skills: ${application.matchingSkills.join(", ") || "none"}`,
         `   - rate: ${rate}`,
@@ -953,7 +986,7 @@ export class JobService {
     if (suggestions.length === 0) {
       return [
         {
-          content: `# ${job.id} suggestions\n\nNo published developer profiles matched this ${getTierLabel(job.marketTier).toLowerCase()} market job yet.`,
+          content: `# ${job.id} suggestions\n\nNo published developer profiles matched the ${this.getDeveloperAccessLabel(job.marketTier).toLowerCase()} requirement yet.`,
           components: []
         }
       ];
@@ -972,7 +1005,7 @@ export class JobService {
       const contentLines = [
         `## Candidate #${(index + 1).toString().padStart(3, "0")}`,
         `**Title:** ${suggestion.profile.headline}`,
-        `**Network:** ${tier}`,
+        `**Developer Tier:** ${tier}`,
         `**Total Score:** ${suggestion.score}`,
         `**Fit / Trust / Tenure / Links:** ${suggestion.fitScore} / ${suggestion.trustScore} / ${suggestion.tenureScore} / ${suggestion.linkScore}`,
         `**Client Rating:** ${rating}`,
@@ -994,7 +1027,7 @@ export class JobService {
         content: [
           `# ${job.id} suggestions`,
           "",
-          `Matched for the ${getTierLabel(job.marketTier)} market.`,
+          `Matched for the ${this.getDeveloperAccessLabel(job.marketTier)} requirement.`,
           "Developer identities stay hidden until you invite a candidate into a shared room."
         ].join("\n"),
         components: []
@@ -1009,14 +1042,53 @@ export class JobService {
       throw new Error(`Job ${jobId} was not found.`);
     }
 
+    const targetForumId = this.getPublicJobsForumId(job.marketTier);
+    const content = this.renderPublicJobPost(job);
+    const components = this.buildPublicJobComponents(job);
+
     await Promise.all(
-      Object.entries(job.publishedPostIds).map(async ([, threadId]) => {
+      Object.entries(job.publishedPostIds).map(async ([tierKey, threadId]) => {
         if (!threadId) {
           return;
         }
 
         const thread = await this.client.channels.fetch(threadId).catch(() => null);
-        if (!thread?.isThread()) {
+        const isWrongForum = Boolean(this.appConfig.forums.jobs) && thread?.isThread() && thread.parentId !== targetForumId;
+        if (!thread?.isThread() || isWrongForum) {
+          if (job.status === "closed" || job.status === "draft") {
+            return;
+          }
+
+          const forumChannel = await this.client.channels.fetch(targetForumId).catch(() => null);
+          if (!forumChannel || forumChannel.type !== ChannelType.GuildForum) {
+            return;
+          }
+
+          const created = await (forumChannel as ForumChannel).threads.create({
+            name: this.buildPublicJobThreadName(job),
+            autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
+            message: {
+              content,
+              components
+            }
+          });
+
+          const tier = tierKey as Tier;
+          await this.store.mutate((draft) => {
+            const existing = draft.jobs.find((item) => item.id === job.id);
+            if (!existing) {
+              return;
+            }
+
+            existing.publishedPostIds[tier] = created.id;
+            existing.updatedAt = nowIso();
+          });
+
+          if (thread?.isThread()) {
+            await thread.setArchived(true).catch(() => undefined);
+            await thread.setLocked(true).catch(() => undefined);
+          }
+
           return;
         }
 
@@ -1027,9 +1099,9 @@ export class JobService {
 
         await thread.setName(this.buildPublicJobThreadName(job)).catch(() => undefined);
         await starterMessage.edit({
-          content: this.renderPublicJobPost(job),
+          content,
           embeds: [],
-          components: this.buildPublicJobComponents(job)
+          components
         });
       })
     );
@@ -1043,7 +1115,7 @@ export class JobService {
     return [
       `# ${job.title}`,
       "",
-      `**Network:** ${this.getTierBadge(job.marketTier)}`,
+      `**Developer Access:** ${this.getDeveloperAccessBadge(job.marketTier)}`,
       "",
       `**Budget:** ${budget}`,
       `**Timeline:** ${timeline}`,
@@ -1126,6 +1198,10 @@ export class JobService {
     return job.title;
   }
 
+  private getPublicJobsForumId(tier: Tier): string {
+    return this.appConfig.forums.jobs ?? this.appConfig.forums.opportunities[tier];
+  }
+
   private formatPublicSkillTags(skills: string[]): string {
     if (skills.length === 0) {
       return "N/A";
@@ -1142,6 +1218,21 @@ export class JobService {
     return skills.map((skill) => `\`${skill}\``).join(" ");
   }
 
+  private getDeveloperAccessLabel(tier: Tier): string {
+    return `${getTierLabel(tier)} Access`;
+  }
+
+  private getDeveloperAccessBadge(tier: Tier): string {
+    switch (tier) {
+      case "gold":
+        return "\u{1F947} Gold Access";
+      case "silver":
+        return "\u{1F948} Silver Access";
+      case "copper":
+        return "\u{1F949} Bronze Access";
+    }
+  }
+
   private getPrivateJobStatusBadge(status: JobRecord["status"]): string {
     switch (status) {
       case "published":
@@ -1154,17 +1245,6 @@ export class JobService {
         return "\u{23F8}\u{FE0F} Paused";
       case "draft":
         return "\u{26AA} Draft";
-    }
-  }
-
-  private getTierBadge(tier: Tier): string {
-    switch (tier) {
-      case "gold":
-        return "🥇 Gold";
-      case "silver":
-        return "🥈 Silver";
-      case "copper":
-        return "🥉 Copper";
     }
   }
 

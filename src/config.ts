@@ -8,9 +8,10 @@ const envSchema = z.object({
   DISCORD_CLIENT_ID: z.string().min(1),
   DISCORD_GUILD_ID: z.string().min(1),
   STAFF_ROLE_IDS: z.string().min(1),
-  CLIENT_GOLD_DESK_CHANNEL_ID: z.string().min(1),
-  CLIENT_SILVER_DESK_CHANNEL_ID: z.string().min(1),
-  CLIENT_COPPER_DESK_CHANNEL_ID: z.string().min(1),
+  CLIENT_DESK_CHANNEL_ID: z.string().min(1).optional(),
+  CLIENT_GOLD_DESK_CHANNEL_ID: z.string().min(1).optional(),
+  CLIENT_SILVER_DESK_CHANNEL_ID: z.string().min(1).optional(),
+  CLIENT_COPPER_DESK_CHANNEL_ID: z.string().min(1).optional(),
   DEV_GOLD_DESK_CHANNEL_ID: z.string().min(1),
   DEV_SILVER_DESK_CHANNEL_ID: z.string().min(1),
   DEV_COPPER_DESK_CHANNEL_ID: z.string().min(1),
@@ -18,6 +19,7 @@ const envSchema = z.object({
   CLIENT_PRIVATE_CATEGORY_ID: z.string().min(1),
   DEV_PRIVATE_CATEGORY_ID: z.string().min(1),
   CASE_PRIVATE_CATEGORY_ID: z.string().min(1),
+  JOBS_FORUM_ID: z.string().min(1).optional(),
   GOLD_OPPORTUNITIES_FORUM_ID: z.string().min(1),
   SILVER_OPPORTUNITIES_FORUM_ID: z.string().min(1),
   COPPER_OPPORTUNITIES_FORUM_ID: z.string().min(1),
@@ -55,7 +57,8 @@ export const config = {
   guildId: raw.DISCORD_GUILD_ID,
   staffRoleIds: parseCsv(raw.STAFF_ROLE_IDS),
   channelIds: {
-    clientDesk: {
+    clientDesk: raw.CLIENT_DESK_CHANNEL_ID,
+    legacyClientDesk: {
       gold: raw.CLIENT_GOLD_DESK_CHANNEL_ID,
       silver: raw.CLIENT_SILVER_DESK_CHANNEL_ID,
       copper: raw.CLIENT_COPPER_DESK_CHANNEL_ID
@@ -78,6 +81,7 @@ export const config = {
     casePrivate: raw.CASE_PRIVATE_CATEGORY_ID
   },
   forums: {
+    jobs: raw.JOBS_FORUM_ID,
     opportunities: {
       gold: raw.GOLD_OPPORTUNITIES_FORUM_ID,
       silver: raw.SILVER_OPPORTUNITIES_FORUM_ID,

@@ -27,6 +27,7 @@ import { TicketService } from "../services/TicketService.js";
 import { TranscriptService } from "../services/TranscriptService.js";
 import { JsonStore } from "../storage/JsonStore.js";
 import { isStaff } from "../utils/discord.js";
+import { getTierLabel } from "../utils/tier.js";
 import { buildSafetyDeskComponents, buildSafetyDeskEmbed } from "./panels.js";
 
 export class TrustContractBot {
@@ -337,9 +338,28 @@ export class TrustContractBot {
     const deskTier = this.parseTier(entityId);
 
     if (scope === "desk" && action === "new_job") {
-      if (!deskTier || !(await this.access.canAccessMarket(interaction.user.id, "client", deskTier))) {
+      const allowedTiers = await this.access.getAllowedClientPublishTiers(interaction.user.id);
+      if (allowedTiers.length === 0) {
         await interaction.reply({
-          content: "Client access has not been granted for that desk.",
+          content: "Client access has not been granted for your account yet.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: "Choose the required developer access tier for this job.",
+        components: this.jobs.buildClientDeskAccessButtons(allowedTiers),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (scope === "desk" && action === "new_job_access" && deskTier) {
+      const allowedTiers = await this.access.getAllowedClientPublishTiers(interaction.user.id);
+      if (!allowedTiers.includes(deskTier)) {
+        await interaction.reply({
+          content: `You are not allowed to create ${this.formatDeveloperAccessLabel(deskTier)} jobs.`,
           ephemeral: true
         });
         return;
@@ -350,19 +370,24 @@ export class TrustContractBot {
     }
 
     if (scope === "desk" && action === "my_jobs") {
-      if (!deskTier || !(await this.access.canAccessMarket(interaction.user.id, "client", deskTier))) {
+      if (!(await this.access.hasKind(interaction.user.id, "client"))) {
         await interaction.reply({
-          content: "Client access has not been granted for that desk.",
+          content: "Client access has not been granted for your account yet.",
           ephemeral: true
         });
         return;
       }
 
-      const jobs = await this.jobs.listJobsByClient(interaction.user.id, deskTier);
+      const jobs = await this.jobs.listJobsByClient(interaction.user.id);
       const content =
         jobs.length === 0
           ? "You do not have any jobs yet."
-          : jobs.map((job) => `${job.id} â€¢ ${job.title} â€¢ ${job.status}`).join("\n");
+          : jobs
+              .map(
+                (job) =>
+                  `${job.id} • ${job.title} • ${job.status} • ${this.formatDeveloperAccessLabel(job.marketTier)}`
+              )
+              .join("\n");
       await interaction.reply({
         content,
         ephemeral: true
@@ -435,7 +460,7 @@ export class TrustContractBot {
           !(await this.access.canAccessMarket(interaction.user.id, "client", job.marketTier)))
       ) {
         await interaction.reply({
-          content: `You are not allowed to publish jobs into the ${job.marketTier} feed.`,
+          content: `You are not allowed to publish a ${this.formatDeveloperAccessLabel(job.marketTier)} job.`,
           ephemeral: true
         });
         return;
@@ -444,7 +469,9 @@ export class TrustContractBot {
       await interaction.deferReply({ ephemeral: true });
       const threadId = await this.jobs.publishJob(entityId);
       await this.syncJobRoom(entityId);
-      await interaction.editReply(`Published ${entityId} to ${job.marketTier}: <#${threadId}>`);
+      await interaction.editReply(
+        `Published ${entityId} to the public jobs forum with ${this.formatDeveloperAccessLabel(job.marketTier)}: <#${threadId}>`
+      );
       return;
     }
 
@@ -585,7 +612,7 @@ export class TrustContractBot {
 
       if (!(await this.access.canAccessMarket(profile.userId, "developer", job.marketTier))) {
         await interaction.reply({
-          content: "That candidate no longer has access to this market.",
+          content: "That candidate no longer meets the required developer access tier.",
           ephemeral: true
         });
         return;
@@ -709,7 +736,7 @@ export class TrustContractBot {
 
       if (!(await this.access.canAccessMarket(interaction.user.id, "developer", job.marketTier))) {
         await interaction.reply({
-          content: `Your developer access does not cover the ${job.marketTier} market.`,
+          content: this.formatDeveloperAccessRestriction(job.marketTier),
           ephemeral: true
         });
         return;
@@ -916,7 +943,7 @@ export class TrustContractBot {
       }
 
       if (!(await this.access.canAccessMarket(interaction.user.id, "developer", job.marketTier))) {
-        await interaction.editReply(`Your developer access does not cover the ${job.marketTier} market.`);
+        await interaction.editReply(this.formatDeveloperAccessRestriction(job.marketTier));
         return;
       }
 
@@ -1612,6 +1639,21 @@ export class TrustContractBot {
     }
   }
 
+  private formatDeveloperAccessLabel(tier: Tier): string {
+    return `${getTierLabel(tier)} Access`;
+  }
+
+  private formatDeveloperAccessRestriction(tier: Tier): string {
+    switch (tier) {
+      case "gold":
+        return "This job is limited to Gold developers.";
+      case "silver":
+        return "This job is limited to Silver and Gold developers.";
+      case "copper":
+        return "This job is limited to approved developers in the marketplace.";
+    }
+  }
+
   private hasTierMemberCountChannelsConfigured(): boolean {
     return this.getConfiguredTierCountChannels().length > 0;
   }
@@ -1737,21 +1779,41 @@ export class TrustContractBot {
     const safetyDeskChannel = safetyDesk as TextChannel;
     const tiers: Tier[] = ["gold", "silver", "copper"];
 
-    for (const tier of tiers) {
-      const clientDesk = await this.client.channels.fetch(this.appConfig.channelIds.clientDesk[tier]);
+    const clientDeskChannelId = this.appConfig.channelIds.clientDesk;
+    if (clientDeskChannelId) {
+      const clientDesk = await this.client.channels.fetch(clientDeskChannelId);
       if (!clientDesk?.isTextBased() || clientDesk.isDMBased()) {
-        throw new Error(`Configured ${tier} client desk channel is invalid.`);
+        throw new Error("Configured client desk channel is invalid.");
       }
 
+      await (clientDesk as TextChannel).send({
+        embeds: [this.jobs.buildClientDeskEmbed()],
+        components: this.jobs.buildClientDeskComponents()
+      });
+    } else {
+      for (const tier of tiers) {
+        const legacyClientDeskChannelId = this.appConfig.channelIds.legacyClientDesk[tier];
+        if (!legacyClientDeskChannelId) {
+          continue;
+        }
+
+        const legacyClientDesk = await this.client.channels.fetch(legacyClientDeskChannelId);
+        if (!legacyClientDesk?.isTextBased() || legacyClientDesk.isDMBased()) {
+          throw new Error(`Configured ${tier} client desk channel is invalid.`);
+        }
+
+        await (legacyClientDesk as TextChannel).send({
+          embeds: [this.jobs.buildClientDeskEmbed()],
+          components: this.jobs.buildClientDeskComponents()
+        });
+      }
+    }
+
+    for (const tier of tiers) {
       const devDesk = await this.client.channels.fetch(this.appConfig.channelIds.devDesk[tier]);
       if (!devDesk?.isTextBased() || devDesk.isDMBased()) {
         throw new Error(`Configured ${tier} developer desk channel is invalid.`);
       }
-
-      await (clientDesk as TextChannel).send({
-        embeds: [this.jobs.buildClientDeskEmbed(tier)],
-        components: this.jobs.buildClientDeskComponents(tier)
-      });
 
       await (devDesk as TextChannel).send({
         embeds: [this.profiles.buildDeskEmbed(tier)],
@@ -2043,3 +2105,4 @@ function buildFinalizeTranscriptChoiceComponents(
     )
   ];
 }
+
